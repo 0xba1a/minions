@@ -313,16 +313,17 @@ class MicroBot:
         logger.info("🔚 TASK COMPLETED : %s...", task[0:15])
         return BotRunResult(status=True, result=llm_response.thoughts, error=None)
 
-    def _mount_additional(self, mount: Mount):
-        if mount.mount_type != MountType.COPY:
-            logger.error(
-                "%s Only COPY mount type is supported for additional mounts for now",
-                LogLevelEmoji.ERROR,
-            )
-            raise ValueError(
-                "Only COPY mount type is supported for additional mounts for now"
-            )
+def _mount_additional(self, mount: Mount):
+    if mount.mount_type != MountType.COPY:
+        logger.error(
+            "%s Only COPY mount type is supported for additional mounts for now",
+            LogLevelEmoji.ERROR,
+        )
+        raise ValueError(
+            "Only COPY mount type is supported for additional mounts for now"
+        )
 
+    if mount not in self.mounted:
         self.mounted.append(mount)
         copy_to_container_result = self.environment.copy_to_container(
             mount.host_path_info.abs_path, mount.sandbox_path

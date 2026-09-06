@@ -49,6 +49,7 @@ function getInputs() {
     codebasePath: tl.getPathInput("codebasePath", true, true),
     logFilePath: input("logFilePath", true),
     outputFilePath: input("outputFilePath", false),
+    debuggingLogFile: input("debuggingLogFile", false),
     additionalContext: input("additionalContext", false),
     timeoutSeconds: input("timeoutSeconds", false) || DEFAULT_TIMEOUT_SECONDS,
     maxIterations: input("maxIterations", false),
@@ -95,24 +96,34 @@ function validateInputs(inputs) {
   }
 
   if (inputs.outputFilePath) {
-    if (!path.isAbsolute(inputs.outputFilePath)) {
-      throw new Error(`outputFilePath must be an absolute path: ${inputs.outputFilePath}`);
-    }
+    inputs.outputFilePath = validateWritableFilePath(inputs.outputFilePath, "outputFilePath");
+  }
 
-    inputs.outputFilePath = path.resolve(inputs.outputFilePath);
-    const extension = path.extname(inputs.outputFilePath).toLowerCase();
-    if (extension !== ".txt" && extension !== ".md" && extension !== ".log") {
-      throw new Error(`outputFilePath must end with .txt, .md, or .log: ${inputs.outputFilePath}`);
-    }
-
-    if (fs.existsSync(inputs.outputFilePath) && fs.statSync(inputs.outputFilePath).isDirectory()) {
-      throw new Error(`outputFilePath must be a file path, not a directory: ${inputs.outputFilePath}`);
-    }
+  if (inputs.debuggingLogFile) {
+    inputs.debuggingLogFile = validateWritableFilePath(inputs.debuggingLogFile, "debuggingLogFile");
   }
 
   if (inputs.additionalContext && inputs.additionalContext.length > MAX_USER_PROMPT_LENGTH) {
     throw new Error(`additionalContext must be ${MAX_USER_PROMPT_LENGTH} characters or fewer`);
   }
+}
+
+function validateWritableFilePath(filePath, label) {
+  if (!path.isAbsolute(filePath)) {
+    throw new Error(`${label} must be an absolute path: ${filePath}`);
+  }
+
+  const resolved = path.resolve(filePath);
+  const extension = path.extname(resolved).toLowerCase();
+  if (extension !== ".txt" && extension !== ".md" && extension !== ".log") {
+    throw new Error(`${label} must end with .txt, .md, or .log: ${resolved}`);
+  }
+
+  if (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()) {
+    throw new Error(`${label} must be a file path, not a directory: ${resolved}`);
+  }
+
+  return resolved;
 }
 
 async function loginWithServiceConnection(serviceConnection) {
@@ -179,16 +190,16 @@ function microbotsEnvironment(inputs) {
   });
 }
 
-function ensureOutputParentDirectory(outputFilePath) {
+function ensureOutputParentDirectory(outputFilePath, description) {
   if (!outputFilePath) return;
 
   const outputDirectory = path.dirname(outputFilePath);
   if (fs.existsSync(outputDirectory) && !fs.statSync(outputDirectory).isDirectory()) {
-    throw new Error(`outputFilePath parent must be a directory: ${outputDirectory}`);
+    throw new Error(`${description} parent must be a directory: ${outputDirectory}`);
   }
 
   fs.mkdirSync(outputDirectory, { recursive: true });
-  console.log(`##[section]MicrobotsLogAnalyzer: analysis output will overwrite ${outputFilePath}`);
+  console.log(`##[section]MicrobotsLogAnalyzer: ${description} will overwrite ${outputFilePath}`);
 }
 
 function runLogAnalyzer(python, inputs) {
@@ -201,10 +212,12 @@ function runLogAnalyzer(python, inputs) {
   ];
 
   if (inputs.outputFilePath) args.push("--output-file", inputs.outputFilePath);
+  if (inputs.debuggingLogFile) args.push("--debug-log-file", inputs.debuggingLogFile);
   if (inputs.additionalContext) args.push("--user-prompt", inputs.additionalContext);
   if (inputs.maxIterations) args.push("--max-iterations", inputs.maxIterations);
 
-  ensureOutputParentDirectory(inputs.outputFilePath);
+  ensureOutputParentDirectory(inputs.outputFilePath, "analysis output");
+  ensureOutputParentDirectory(inputs.debuggingLogFile, "debugging log");
   runCommand(python, args, microbotsEnvironment(inputs));
 }
 

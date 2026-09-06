@@ -8,7 +8,7 @@
   "author": "Microbots contributors",
   "version": {
     "Major": 0,
-    "Minor": 4,
+    "Minor": 5,
     "Patch": 0
   },
   "instanceNameFormat": "Microbots Log Analyzer: $(logFilePath)",
@@ -64,6 +64,13 @@
       "label": "Analysis output file path",
       "required": false,
       "helpMarkDown": "Optional absolute path to a .txt, .md, or .log file where the LLM analysis result will be written. The file does not need to exist; the task creates missing directories and replaces any existing file contents."
+    },
+    {
+      "name": "debuggingLogFile",
+      "type": "string",
+      "label": "Debugging log file path",
+      "required": false,
+      "helpMarkDown": "Optional absolute path to a .txt, .md, or .log file where the analyzer's runtime logs (the bot's step-by-step thoughts, tool calls, and command outputs) will be written. The file does not need to exist; the task creates missing directories and overwrites any existing file contents."
     },
     {
       "name": "additionalContext",

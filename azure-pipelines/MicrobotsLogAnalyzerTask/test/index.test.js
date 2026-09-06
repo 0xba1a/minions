@@ -153,6 +153,7 @@ def get_bearer_token_provider(credential, scope):
 `);
   writeFile(path.join(mockModules, "microbots.py"), `
 import json
+import logging
 import os
 from types import SimpleNamespace
 
@@ -168,6 +169,7 @@ class LogAnalysisBot:
         self.token_provider = token_provider
 
     def run(self, **kwargs):
+        logging.getLogger("microbots.MicroBot").info("MOCK_TRAJECTORY LLM tool call: ls -1 /var/log")
         record = {
             "model": self.model,
             "folder_to_mount": self.folder_to_mount,
@@ -317,6 +319,30 @@ test("Optional Output File Path Must Be Absolute Plain Text Path", () => {
   assert.equal(logInputs.outputFilePath, path.join(codebasePath, "out", "analysis.log"));
 });
 
+test("Optional Debugging Log File Must Be Absolute Allowed-Extension Path", () => {
+  const { task } = loadTask();
+  const codebasePath = makeProjectWithLog();
+  const validInputs = {
+    codebasePath,
+    logFilePath: "logs/build.log",
+    endpoint: "https://example.openai.azure.com/",
+    timeoutSeconds: "600",
+  };
+
+  assert.throws(
+    () => task.validateInputs({ ...validInputs, debuggingLogFile: "trajectory.log" }),
+    /debuggingLogFile must be an absolute path/
+  );
+  assert.throws(
+    () => task.validateInputs({ ...validInputs, debuggingLogFile: path.join(codebasePath, "trajectory.json") }),
+    /debuggingLogFile must end with .txt, .md, or .log/
+  );
+
+  const inputs = { ...validInputs, debuggingLogFile: path.join(codebasePath, "out", "trajectory.log") };
+  task.validateInputs(inputs);
+  assert.equal(inputs.debuggingLogFile, path.join(codebasePath, "out", "trajectory.log"));
+});
+
 test("Invalid Inputs Are Rejected: endpoint, timeout, and maxIterations", () => {
   const { task } = loadTask();
   const codebasePath = makeProjectWithLog();
@@ -425,6 +451,39 @@ test("Optional Additional Context Is Passed To LogAnalysisBot", async () => {
     max_iterations: 12,
     user_prompt: "Prefer dependency restore failures as the likely root cause.",
   });
+});
+
+test("Optional Debugging Log File Captures Runtime Trajectory", async () => {
+  const debugRoot = fs.mkdtempSync(path.join(os.tmpdir(), "microbots-debug-test-"));
+  const debuggingLogFile = path.join(debugRoot, "nested", "trajectory.log");
+
+  const { calls, runnerResult } = await runTaskWithMockServiceConnectionAndMockMicrobots({
+    inputs: { debuggingLogFile },
+  });
+
+  const runnerCall = calls.spawnSync.find((call) => (
+    call.args[0] === path.join(taskDir, "log_analyzer_runner.py")
+  ));
+  assert.ok(runnerCall);
+  const runnerArgs = Array.from(runnerCall.args);
+  assert.ok(runnerArgs.includes("--debug-log-file"));
+  assert.equal(runnerArgs[runnerArgs.indexOf("--debug-log-file") + 1], debuggingLogFile);
+
+  assert.equal(runnerResult.status, 0, runnerResult.stderr);
+  assert.equal(fs.existsSync(debuggingLogFile), true);
+  const trajectory = fs.readFileSync(debuggingLogFile, "utf8");
+  assert.match(trajectory, /MOCK_TRAJECTORY LLM tool call: ls -1 \/var\/log/);
+  assert.match(trajectory, /microbots\.MicroBot INFO/);
+});
+
+test("Debugging Log File Is Skipped When Not Provided", async () => {
+  const { calls } = await runTaskWithMockServiceConnectionAndMockMicrobots();
+
+  const runnerCall = calls.spawnSync.find((call) => (
+    call.args[0] === path.join(taskDir, "log_analyzer_runner.py")
+  ));
+  assert.ok(runnerCall);
+  assert.ok(!Array.from(runnerCall.args).includes("--debug-log-file"));
 });
 
 test("Existing Python Environment Is Reused Only After A Completed Setup", () => {

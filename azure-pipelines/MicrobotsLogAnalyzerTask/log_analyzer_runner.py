@@ -1,4 +1,5 @@
 import argparse
+import logging
 import os
 import sys
 import textwrap
@@ -17,6 +18,7 @@ def parse_args():
     parser.add_argument("--log-file-path", required=True)
     parser.add_argument("--timeout-seconds", required=True, type=int)
     parser.add_argument("--output-file")
+    parser.add_argument("--debug-log-file")
     parser.add_argument("--user-prompt")
     parser.add_argument("--max-iterations", type=int)
     return parser.parse_args()
@@ -38,6 +40,20 @@ def write_text_file(file_path, content):
         output_file.write(content)
 
 
+def configure_debug_logging(debug_log_file):
+    """Capture Microbots runtime logs (thoughts, tool calls, command output) to a file."""
+    os.makedirs(os.path.dirname(debug_log_file), exist_ok=True)
+    file_handler = logging.FileHandler(debug_log_file, mode="w", encoding="utf-8")
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s")
+    )
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(file_handler)
+
+
 def main():
     args = parse_args()
     codebase_path = os.path.abspath(args.codebase_path)
@@ -46,6 +62,8 @@ def main():
     max_iterations = args.max_iterations
 
     os.chdir(codebase_path)
+    if args.debug_log_file:
+        configure_debug_logging(args.debug_log_file)
     log(
         f"MicrobotsLogAnalyzer: analyzing {log_file_path} with deployment "
         f"{os.environ['AZURE_OPENAI_DEPLOYMENT_NAME']}"
@@ -55,6 +73,8 @@ def main():
         log(f"MicrobotsLogAnalyzer: max iterations is {max_iterations}")
     if args.output_file:
         log(f"MicrobotsLogAnalyzer: analysis output file is {args.output_file}")
+    if args.debug_log_file:
+        log(f"MicrobotsLogAnalyzer: debugging log file is {args.debug_log_file}")
     if args.user_prompt:
         log("MicrobotsLogAnalyzer: additional user context was provided")
 

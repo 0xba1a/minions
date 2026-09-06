@@ -44,6 +44,7 @@ See the complete sample pipeline at [microbots-log-analyzer.yml](https://github.
     codebasePath: $(Build.SourcesDirectory)
     logFilePath: logs/build.log
     outputFilePath: $(Build.ArtifactStagingDirectory)/microbots-log-analysis.md
+    debuggingLogFile: $(Build.ArtifactStagingDirectory)/microbots-log-analysis-trajectory.log
     additionalContext: |
       This build usually fails when package version conflicts occur.
       Please consider it while analyzing the log.
@@ -54,6 +55,8 @@ See the complete sample pipeline at [microbots-log-analyzer.yml](https://github.
 The log file must exist before `MicrobotsLogAnalyzer@0` runs. Relative `logFilePath` values are resolved from `codebasePath`; absolute paths are also supported.
 
 `outputFilePath` is optional. When it is provided, it must be an absolute path ending in `.txt`, `.md`, or `.log`. The file does not need to exist; the task creates missing directories and replaces any existing file content with the latest LLM analysis result.
+
+`debuggingLogFile` is optional. When it is provided, it must be an absolute path ending in `.txt`, `.md`, or `.log`. The task writes the bot's runtime trajectory to it — the step-by-step LLM thoughts, tool calls, and command outputs that show how the analysis was reached. The file does not need to exist; the task creates missing directories and overwrites any existing file content. When it is omitted, no trajectory file is written and behavior is unchanged.
 
 `additionalContext` is optional. When provided, it is appended as extra user context for the log analysis and does not replace or override the Microbots system prompt. Maximum length: 1024 characters.
 
@@ -74,6 +77,7 @@ The log file must exist before `MicrobotsLogAnalyzer@0` runs. Relative `logFileP
 | `codebasePath` | Yes | - | Repository or source folder Microbots can inspect while analyzing the log. |
 | `logFilePath` | Yes | - | Log file path. Use an absolute path, or a relative path resolved from `codebasePath`. |
 | `outputFilePath` | No | - | Absolute `.txt`, `.md`, or `.log` path where the LLM analysis result is written. Missing directories are created, and existing file contents are replaced. |
+| `debuggingLogFile` | No | - | Absolute `.txt`, `.md`, or `.log` path where the bot's runtime trajectory (step-by-step LLM thoughts, tool calls, and command outputs) is written. Missing directories are created, and existing file contents are replaced. Omit to skip. |
 | `additionalContext` | No | - | Additional user context appended to the log analysis prompt. Maximum length: 1024 characters. |
 | `timeoutSeconds` | No | `600` | Maximum time for `LogAnalysisBot.run()`. |
 | `maxIterations` | No | `20` | Maximum number of Microbots iterations. Leave unset to use the default from `LogAnalysisBot.run()`. |
@@ -88,6 +92,7 @@ The log file must exist before `MicrobotsLogAnalyzer@0` runs. Relative `logFileP
 4. The task installs `microbots[azure_ad]` into that virtual environment.
 5. A short Python runner creates `LogAnalysisBot` with `AzureCliCredential`, mounts `codebasePath` as context, passes `logFilePath`, optional `additionalContext`, optional `maxIterations`, and `timeoutSeconds` to `LogAnalysisBot.run()`, and prints the analysis result.
 6. If `outputFilePath` is provided, the task writes the LLM analysis result to that file, replacing any existing contents.
+7. If `debuggingLogFile` is provided, the task captures the bot's runtime logs (LLM thoughts, tool calls, and command outputs) to that file, replacing any existing contents.
 
 The task clears the Azure CLI account at the end of the run. Its task manifest also uses Azure Pipelines command restrictions so analyzed log content cannot run arbitrary logging commands or set pipeline variables.
 

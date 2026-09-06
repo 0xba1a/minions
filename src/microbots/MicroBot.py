@@ -227,7 +227,17 @@ class MicroBot:
             error="Did not complete",
         )
         logger.info("%s TASK STARTED : %s...", LogLevelEmoji.INFO, task)
-
+        if llm_response.task_done is True:
+            if llm_response.thoughts:
+                logger.info(
+                    f" LLM final thoughts: {llm_response.thoughts}",
+                )
+            logger.info("TASK COMPLETED : %s...", task[0:15])
+            return BotRunResult(
+                status=True, 
+                result=llm_response.thoughts, 
+                error=None
+            )
         while llm_response.task_done is False:
             # increment iteration count
             self.iteration_count += 1

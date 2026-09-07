@@ -4,7 +4,6 @@ Two modes, selected by ``--task``:
 
 - ``--task <name>`` given: run the full train <-> eval loop for that
   task.
-- ``--task`` omitted: train only, no eval task, with empty feedback.
 
 Both modes are dispatched via ``orchestrator.run``.
 """
@@ -15,7 +14,7 @@ from pathlib import Path
 
 from microbots.auto_memory.orchestrator import run
 from microbots.auto_memory.task_registry import TASK_REGISTRY, discover_tasks
-from microbots.auto_memory.workdir import load_config, require_workdir, resolve_workdir
+from microbots.auto_memory.workdir import require_workdir, resolve_workdir
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +46,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--task",
+        required=True,
         choices=sorted(TASK_REGISTRY),
-        help="Eval task to run. Omit to only run training, with no eval task.",
+        help="Eval task to run.",
+    )
+    parser.add_argument(
+        "--config-file", type=Path, help="Path to the task configuration file.",
     )
     parser.add_argument("--max-rounds", type=int, default=5)
     parser.add_argument("--training-iterations", type=int, default=10)
@@ -68,25 +71,24 @@ def main(argv: list[str] | None = None) -> None:
     workdir = Path(args.workdir) if args.workdir else resolve_workdir()
     require_workdir(workdir)
 
-    config = load_config(workdir)
-    tasks = (
-        TASK_REGISTRY[args.task].from_config(config.get("task_args", {}))
-        if args.task
-        else [None]
+    if not args.config_file:
+        config_file = workdir / "task_config.yaml"
+    else:
+        config_file = args.config_file
+    if not config_file.is_file():
+        raise FileNotFoundError(f"Config file not found: {config_file}")
+
+    result = run(
+        workdir=workdir,
+        model=args.model,
+        task=TASK_REGISTRY[args.task](config_file=config_file),
+        max_rounds=args.max_rounds,
+        training_iterations=args.training_iterations,
     )
-    for task in tasks:
-        result = run(
-            workdir=workdir,
-            model=args.model,
-            task=task,
-            max_rounds=args.max_rounds,
-            training_iterations=args.training_iterations,
-            config=config,
+    if result is not None:
+        logger.info(
+            "task=%s passed=%s rounds_run=%d", args.task, result.passed, result.rounds_run
         )
-        if result is not None:
-            logger.info(
-                "task=%s passed=%s rounds_run=%d", args.task, result.passed, result.rounds_run
-            )
 
 if __name__ == "__main__":
     main()

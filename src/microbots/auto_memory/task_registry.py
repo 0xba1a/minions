@@ -7,13 +7,17 @@ Callers (e.g. a CLI) look tasks up by name via ``create_task``.
 
 import importlib
 import pkgutil
+from collections.abc import Callable
 
 from microbots.auto_memory.evalTask import EvalTask
 
 TASK_REGISTRY: dict[str, type[EvalTask]] = {}
 
-def register_task(name: str):
+def register_task(name: str) -> Callable[[type[EvalTask]], type[EvalTask]]:
     """Register an ``EvalTask`` subclass under ``name`` as a class decorator.
+
+    Each name maps to exactly one class; registering a name twice is a
+    programming error rather than a silent overwrite.
 
     Parameters
     ----------
@@ -40,27 +44,39 @@ def register_task(name: str):
         -------
         type[EvalTask]
             ``task_cls``, unchanged.
+
+        Raises
+        ------
+        ValueError
+            If ``name`` is already registered to a different class.
         """
+        registered = TASK_REGISTRY.get(name)
+        if registered is not None and registered is not task_cls:
+            raise ValueError(
+                f"Task name {name!r} is already registered to "
+                f"{registered.__module__}.{registered.__qualname__}; "
+                f"cannot also register {task_cls.__module__}.{task_cls.__qualname__}."
+            )
         TASK_REGISTRY[name] = task_cls
         return task_cls
 
     return decorator
 
-# Not being used currently, but kept it for future use if required.
-def create_task(name: str, **kwargs) -> EvalTask:
-    """Construct a registered ``EvalTask`` by name.
+def create_task(name: str) -> EvalTask:
+    """Construct the registered ``EvalTask`` for ``name``.
+
+    Tasks take no constructor arguments; per-run configuration is
+    applied afterwards via ``EvalTask.parse_config``.
 
     Parameters
     ----------
     name : str
         The registered task name, e.g. ``"swebenchverified"``.
-    **kwargs
-        Keyword arguments forwarded to the task's constructor.
 
     Returns
     -------
     EvalTask
-        The constructed task instance.
+        A new instance of the class registered under ``name``.
 
     Raises
     ------
@@ -73,7 +89,7 @@ def create_task(name: str, **kwargs) -> EvalTask:
         raise ValueError(
             f"Unknown task {name!r}. Registered tasks: {sorted(TASK_REGISTRY)}"
         ) from None
-    return task_cls(**kwargs)
+    return task_cls()
 
 def discover_tasks(package_name: str = "microbots.auto_memory.eval") -> None:
     """Import every module in ``package_name`` so ``@register_task`` fires.

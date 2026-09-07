@@ -38,24 +38,24 @@ def resolve_workdir(base: Path | None = None) -> Path:
     Path
         ``workdir`` resolved relative to ``base`` (or ``Path.cwd()``).
     """
-    return (base or Path.cwd()) / WORKDIR_NAME
+    if base is not None and not base.is_absolute():
+        raise ValueError(f"base must be an absolute path: {base}")
+    workdir = (base or Path.cwd()) / WORKDIR_NAME
+    return workdir
 
 
 def require_workdir(workdir: Path) -> None:
-    """Validate that ``workdir`` exist.
+    """Validate that ``workdir`` exist. Create if not exist
 
     Parameters
     ----------
     workdir : Path
         The workdir to validate.
 
-    Raises
-    ------
-    FileNotFoundError
-        If ``workdir`` does not exist.
     """
-    if not workdir.is_dir():
-        raise FileNotFoundError(f"workdir not found: {workdir}")
+    # create workdir if not existing
+    if not workdir.exists():
+        workdir.mkdir(parents=True)
 
 
 def config_path(workdir: Path) -> Path:
@@ -115,28 +115,6 @@ def repo_dir(workdir: Path) -> Path:
         ``workdir/repo``.
     """
     return workdir / REPO_DIRNAME
-
-
-def eval_repo_dir(workdir: Path) -> Path:
-    """Return the path to the repo an eval task clones/manages itself.
-
-    Kept separate from ``repo_dir`` (the training repo) because a
-    task's ``setup`` may clone or reset this directory every round
-    (e.g. ``SweBenchVerifiedTask`` checks out a different repo/commit
-    per dataset instance), which would otherwise conflict with the
-    persistent training checkout at ``repo_dir``.
-
-    Parameters
-    ----------
-    workdir : Path
-        The run's workdir.
-
-    Returns
-    -------
-    Path
-        ``workdir/eval_repo``.
-    """
-    return workdir / EVAL_REPO_DIRNAME
 
 
 def memory_dir(workdir: Path) -> Path:

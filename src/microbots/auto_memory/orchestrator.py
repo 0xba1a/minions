@@ -6,6 +6,7 @@ passes or ``max_rounds`` is exhausted.
 """
 
 from dataclasses import dataclass, field
+import dataclasses
 from logging import getLogger
 from pathlib import Path
 import json
@@ -16,9 +17,7 @@ from microbots.auto_memory.evalTask import EvalOutcome, EvalTask
 from microbots.auto_memory.training.runner import run_training
 from microbots.auto_memory.workdir import (
     eval_log_path,
-    eval_repo_dir,
     eval_result_path,
-    load_config,
     load_round_memory,
     repo_dir,
     save_round_memory,
@@ -87,10 +86,6 @@ def clone_repo(url: str, repo_path: Path) -> None:
 def write_eval_result(workdir: Path, round_num: int, task: EvalTask, outcome: EvalOutcome) -> None:
     """Write a round's eval result to ``result.json``.
 
-    Delegates the content to ``task.build_result(outcome)`` so each
-    task decides what's worth persisting (e.g. ``SweBenchVerifiedTask``
-    includes its dataset instance's fields).
-
     Parameters
     ----------
     workdir : Path
@@ -105,7 +100,7 @@ def write_eval_result(workdir: Path, round_num: int, task: EvalTask, outcome: Ev
     """
     path = eval_result_path(workdir, round_num, task.task_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(task.build_result(outcome), indent=2))
+    path.write_text(json.dumps(dataclasses.asdict(outcome), indent=2))
 
 def run_training_loop(
     repo_path: str,
@@ -148,7 +143,6 @@ def run_training_loop(
 
 def run_train_eval_loop(
     training_repo_path: str,
-    eval_repo_path: str,
     workdir: Path,
     model: str,
     task: EvalTask,
@@ -217,9 +211,10 @@ def run_train_eval_loop(
         logger.info(
             "run_train_eval_loop: round %d/%d starting", round_idx, max_rounds
         )
+        # TODO: Instead of loading new memory dir on every iteration, snapshot the memory.
         memory_dir = str(load_round_memory(workdir, round_idx, instance_id=task.task_id))
         log_path = str(eval_log_path(workdir, round_idx, task.task_id))
-        outcome = task.run(eval_repo_path, memory_dir, model, log_path)
+        outcome = task.eval(memory_dir, model, log_path)
         outcomes.append(outcome)
 
         try:
@@ -237,13 +232,12 @@ def run_train_eval_loop(
             logger.info(
                 "run_train_eval_loop: round %d failed (%s), retraining",
                 round_idx,
-                outcome.result.reason,
+                outcome.feedback,
             )
             try:
-                feedback = task.build_feedback(outcome, eval_repo_path, model, log_path)
                 run_training_loop(
                     repo_path=training_repo_path,
-                    feedback=feedback,
+                    feedback=outcome.feedback,
                     memory_dir=memory_dir,
                     model=model,
                     iterations=training_iterations,
@@ -271,40 +265,31 @@ def run_train_eval_loop(
 def run(
     workdir: Path,
     model: str,
-    task: EvalTask | None,
+    task: EvalTask,
     max_rounds: int = 5,
     training_iterations: int = 10,
-    config: dict | None = None,
-) -> LoopResult | None:
-    """Run training only, or the full train/eval loop, depending on ``task``.
+) -> LoopResult:
+    """Run full train/eval loop, depending on ``task``.
 
     Parameters
     ----------
     workdir : Path
         This run's workdir (see ``microbots.auto_memory.workdir``),
-        holding ``config.yaml``, the shared repo clone, and all output.
+        holding ``task_config.yaml``, the shared repo clone, and all output.
     model : str
         The model to use, in the format ``<provider>/<model_name>``.
-    task : EvalTask | None
-        The eval task to run each round, or ``None`` to only run
-        training (with empty feedback, once per ``training_iterations``).
+    task : EvalTask
+        The eval task to run each round.
     max_rounds : int
-        Maximum number of train/eval rounds to attempt, if ``task`` is
-        given. Defaults to 5.
+        Maximum number of train/eval rounds to attempt. Defaults to 5.
     training_iterations : int
         Number of training passes to run per retraining round, each
         reusing the same round memory dir. Defaults to 10.
-    config : dict | None
-        This run's already-loaded ``config.yaml`` contents. If ``None``
-        (the default), it is loaded from ``workdir`` here. Callers that
-        invoke ``run`` repeatedly for the same ``workdir`` (e.g. once
-        per eval task) can load it once and pass it in, to avoid
-        re-reading/re-parsing the file on every call.
 
     Returns
     -------
-    LoopResult | None
-        The eval loop's result if ``task`` was given, otherwise ``None``.
+    LoopResult
+        The eval loop's result.
 
     Raises
     ------
@@ -315,38 +300,29 @@ def run(
         must be configured even for tasks like ``SweBenchVerifiedTask``
         that manage their own separate eval checkout.
     """
-    if config is None:
-        config = load_config(workdir)
-    repo_url = config.get("repo")
-    if not repo_url:
-        raise ValueError(
-            "config.yaml must specify 'repo' (the training checkout's clone "
-            "URL); it is required even when the eval task manages its own "
-            "separate eval repo checkout."
-        )
-    clone_repo(repo_url, repo_dir(workdir))
+    clone_repo(task.repo_url(), repo_dir(workdir))
 
     snapshot_seed_memory(workdir)
 
     training_repo_path = str(repo_dir(workdir))
 
-    if task is None:
-        # Train-only mode has no rounds of its own; round 1 is just a
-        # scratch dir seeded from (and saved back to) top-level memory.
-        memory_dir = str(load_round_memory(workdir, 1))
-        run_training_loop(
-            repo_path=training_repo_path,
-            feedback="",
-            memory_dir=memory_dir,
-            model=model,
-            iterations=training_iterations,
-        )
-        save_round_memory(workdir, 1)
-        return None
+    # TODO: train-only mode will be implemented if required after proper design
+    # if task is None:
+    #     # Train-only mode has no rounds of its own; round 1 is just a
+    #     # scratch dir seeded from (and saved back to) top-level memory.
+    #     memory_dir = str(load_round_memory(workdir, 1))
+    #     run_training_loop(
+    #         repo_path=training_repo_path,
+    #         feedback="",
+    #         memory_dir=memory_dir,
+    #         model=model,
+    #         iterations=training_iterations,
+    #     )
+    #     save_round_memory(workdir, 1)
+    #     return None
 
     return run_train_eval_loop(
         training_repo_path=training_repo_path,
-        eval_repo_path=str(eval_repo_dir(workdir)),
         workdir=workdir,
         model=model,
         task=task,

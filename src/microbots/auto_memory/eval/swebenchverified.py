@@ -12,13 +12,15 @@ import sys
 import tempfile
 import uuid
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import cache
 from logging import getLogger
 from pathlib import Path
 
-from microbots.auto_memory.evalTask import CallbackResult, EvalOutcome, EvalTask
+import yaml
+
+from microbots.auto_memory.evalTask import EvalOutcome, EvalTask
 from microbots.auto_memory.task_registry import register_task
-from microbots.bot.LogAnalysisBot import LogAnalysisBot
+from microbots.bot.ReadingBot import ReadingBot
 from microbots.bot.WritingBot import WritingBot
 from microbots.MicroBot import BotRunResult
 from microbots.tools.tool_definitions.memory_tool import MemoryTool
@@ -29,14 +31,36 @@ SWE_BENCH_VERIFIED = "SWE-bench/SWE-bench_Verified"
 EVAL_AGENT_MODEL_NAME = "microbots-eval-agent"
 
 
-@lru_cache(maxsize=None)
+@dataclass
+class SweBenchInstance:
+    """A single SWE-bench-verified dataset row.
+
+    Attributes
+    ----------
+    instance_id : str
+        Unique identifier for the instance, e.g. ``"django__django-11099"``.
+    repo : str
+        The GitHub repo this instance belongs to, e.g. ``"django/django"``.
+    base_commit : str
+        Commit hash representing the repo state before the issue's fix.
+    problem_statement : str
+        The GitHub issue title and body describing the bug to fix.
+    """
+
+    instance_id: str
+    repo: str
+    base_commit: str
+    problem_statement: str
+
+
+@cache
 def _load_dataset_rows(dataset_name: str):
     """Load and cache ``dataset_name``'s ``test`` split for the process's lifetime.
 
     ``load_dataset`` caches the downloaded files on disk, but still
     re-reads and rebuilds the in-memory ``Dataset`` object on every
     call. Since ``load_instances_of_repo``/``load_instance_using_id``
-    may each be called many times (e.g. once per eval task instance),
+    may each be called many times,
     this wraps ``load_dataset`` with an in-memory cache keyed by
     ``dataset_name``, so the dataset is only loaded once per process.
 
@@ -69,7 +93,7 @@ def _load_dataset_rows(dataset_name: str):
 def load_instances_of_repo(
     dataset_name: str = SWE_BENCH_VERIFIED,
     repo: str | None = None,
-) -> list["SweBenchInstance"]:
+) -> list[SweBenchInstance]:
     """Load all dataset instances, optionally filtered to a single repo.
 
     Parameters
@@ -100,7 +124,7 @@ def load_instances_of_repo(
     ]
     return instances
 
-def load_instance_using_id(instance_id: str, dataset_name: str = SWE_BENCH_VERIFIED) -> "SweBenchInstance":
+def load_instance_using_id(instance_id: str, dataset_name: str = SWE_BENCH_VERIFIED) -> SweBenchInstance:
     """Load a single dataset instance by its instance ID.
 
     Parameters
@@ -133,30 +157,8 @@ def load_instance_using_id(instance_id: str, dataset_name: str = SWE_BENCH_VERIF
             )
     raise ValueError(f"instance_id not found: {instance_id}")
 
-@dataclass
-class SweBenchInstance:
-    """A single SWE-bench-verified dataset row.
-
-    Attributes
-    ----------
-    instance_id : str
-        Unique identifier for the instance, e.g. ``"django__django-11099"``.
-    repo : str
-        The GitHub repo this instance belongs to, e.g. ``"django/django"``.
-    base_commit : str
-        Commit hash representing the repo state before the issue's fix.
-    problem_statement : str
-        The GitHub issue title and body describing the bug to fix.
-    """
-
-    instance_id: str
-    repo: str
-    base_commit: str
-    problem_statement: str
-
-@register_task("swebenchverified")
-class SweBenchVerifiedTask(EvalTask):
-    """Eval task that verifies a fix against one SWE-bench-verified instance.
+class SweBenchVerifiedTask_one():
+    """SWE-bench-verified based evaluation task.
 
     Checks out the instance's repo at its base commit, gives the agent
     the issue's problem statement, and verifies the agent's patch using
@@ -180,28 +182,6 @@ class SweBenchVerifiedTask(EvalTask):
         """
         self.instance = instance
 
-    @classmethod
-    def from_config(cls, task_args: dict) -> list["SweBenchVerifiedTask"]:
-        """Build task(s) from a config's ``task_args`` dict.
-
-        Parameters
-        ----------
-        task_args : dict
-            Task-specific config values, expected to include
-            ``instance_id`` and/or ``swebench_repo``.
-
-        Returns
-        -------
-        list[SweBenchVerifiedTask]
-            One task per matching dataset instance. A single-element
-            list when ``instance_id`` is given.
-        """
-        if task_args.get("instance_id"):
-            instances = [load_instance_using_id(task_args["instance_id"])]
-        else:
-            instances = load_instances_of_repo(repo=task_args.get("swebench_repo"))
-        return [cls(instance) for instance in instances]
-
     @property
     def task_id(self) -> str:
         """Return this instance's SWE-bench-verified ``instance_id``.
@@ -212,28 +192,6 @@ class SweBenchVerifiedTask(EvalTask):
             The dataset instance's ``instance_id``.
         """
         return self.instance.instance_id
-
-    def build_result(self, outcome: EvalOutcome) -> dict:
-        """Summarize a round's outcome, including the instance's dataset fields.
-
-        Parameters
-        ----------
-        outcome : EvalOutcome
-            The round's outcome to summarize.
-
-        Returns
-        -------
-        dict
-            ``passed``/``reason`` plus ``instance_id``, ``repo``, and
-            ``base_commit`` identifying which dataset row this is.
-        """
-        return {
-            "passed": outcome.result.passed,
-            "reason": outcome.result.reason,
-            "instance_id": self.instance.instance_id,
-            "repo": self.instance.repo,
-            "base_commit": self.instance.base_commit,
-        }
 
     def setup(self, repo_path: str) -> None:
         """Clone the instance's repo, or reset it, to its base commit.
@@ -280,7 +238,7 @@ class SweBenchVerifiedTask(EvalTask):
         """
         return self.instance.problem_statement
 
-    def check(self, repo_path: str, agent_output: str, log_path: str) -> CallbackResult:
+    def check(self, repo_path: str, agent_output: str, log_path: str) -> BotRunResult:
         """Verify the agent's patch using the SWE-bench evaluation harness.
 
         Captures the agent's changes as a git diff (after marking any
@@ -306,8 +264,12 @@ class SweBenchVerifiedTask(EvalTask):
 
         Returns
         -------
-        CallbackResult
-            Whether the harness marked this instance as resolved.
+        BotRunResult
+            ``status`` is whether the harness marked this instance as
+            resolved. On failure, ``error`` carries the harness's
+            ``test_output.txt`` (or its console output, if the harness
+            died before producing one) so the feedback bot can see why
+            the tests failed.
         """
         subprocess.run(
             ["git", "add", "--intent-to-add", "."], cwd=repo_path, check=True
@@ -353,12 +315,17 @@ class SweBenchVerifiedTask(EvalTask):
                 report_dir / "logs" / "run_evaluation" / run_id
                 / model_name_or_path / self.instance.instance_id
             )
+            # Read while report_dir still exists; the finally block deletes it.
+            test_output = ""
             with open(log_path, "a") as f:
                 f.write(proc.stdout + proc.stderr)
                 for log_filename in ("run_instance.log", "test_output.txt"):
                     log_file = instance_log_dir / log_filename
                     if log_file.exists():
-                        f.write(f"\n--- {log_filename} ---\n{log_file.read_text()}\n")
+                        content = log_file.read_text()
+                        if log_filename == "test_output.txt":
+                            test_output = content
+                        f.write(f"\n--- {log_filename} ---\n{content}\n")
 
             report_file = instance_log_dir / "report.json"
             passed = False
@@ -369,54 +336,14 @@ class SweBenchVerifiedTask(EvalTask):
             pred_path.unlink(missing_ok=True)
             shutil.rmtree(report_dir, ignore_errors=True)
 
-        return CallbackResult(passed=passed, reason="resolved" if passed else "not resolved")
-
-    def build_feedback(self, outcome: EvalOutcome, repo_path: str, model: str, log_path: str) -> str:
-        """Analyze a failed round's log via ``LogAnalysisBot`` for training feedback.
-
-        Parameters
-        ----------
-        outcome : EvalOutcome
-            The failed outcome to analyze.
-        repo_path : str
-            Absolute path to the repo the task was evaluated against.
-        model : str
-            The model to use, in the format ``<provider>/<model_name>``.
-        log_path : str
-            Path to the round's log file (the same path passed to
-            ``run``), analyzed by ``LogAnalysisBot``.
-
-        Returns
-        -------
-        str
-            Feedback text describing the root cause of the failure and
-            what the agent's memory notes should cover next time.
-        """
-        bot = LogAnalysisBot(model=model, folder_to_mount=repo_path)
-        result: BotRunResult = bot.run(
-            file_name=log_path,
-            user_prompt=(
-                "This log was produced while verifying whether an "
-                "agent completed its task correctly. Identify "
-                "the root cause of the failure and describe concretely "
-                "what the agent's memory notes should cover next time to "
-                "avoid this failure."
-            ),
+        return BotRunResult(
+            status = passed,
+            result = "resolved" if passed else "not resolved",
+            # Harness can fail before producing test_output.txt; fall back to its console output.
+            error = None if passed else (test_output or proc.stdout + proc.stderr)
         )
 
-        if result.status and result.result:
-            return result.result
-
-        logger.warning(
-            "LogAnalysisBot failed to analyze failure (%s); falling back to plain feedback",
-            result.error,
-        )
-        return (
-            f"Evaluation failed. Agent output: {outcome.output}\n"
-            f"Callback reason: {outcome.result.reason}"
-        )
-
-    def run(self, repo_path: str, memory_dir: str, model: str, log_path: str) -> EvalOutcome:
+    def eval(self, repo_path: str, memory_dir: str, model: str, log_path: str) -> BotRunResult:
         """Run one eval iteration: setup -> build_prompt -> WritingBot -> check.
 
         Parameters
@@ -434,7 +361,7 @@ class SweBenchVerifiedTask(EvalTask):
 
         Returns
         -------
-        EvalOutcome
+        BotRunResult
             The result of this eval round, including the agent's output,
             the check verdict.
         """
@@ -454,31 +381,171 @@ class SweBenchVerifiedTask(EvalTask):
             with open(log_path, "a") as f:
                 f.write(f"Agent output:\n{bot_result.result}\n")
 
-            if not bot_result.status:
-                reason = f"Bot run failed: {bot_result.error}"
-                with open(log_path, "a") as f:
-                    f.write(f"\n{reason}\n")
-                result = CallbackResult(passed=False, reason=reason)
-            else:
-                result = self.check(repo_path, bot_result.result or "", log_path)
+            return bot_result
 
-            return EvalOutcome(
-                passed=result.passed,
-                output=bot_result.result,
-                result=result,
-            )
         except Exception as exc:
             logger.exception(
-                "SweBenchVerifiedTask.run: iteration raised %s", type(exc).__name__
+                "SweBenchVerifiedTask.eval: iteration raised %s", type(exc).__name__
             )
             with open(log_path, "a") as f:
                 f.write(f"\nException during eval iteration: {type(exc).__name__}: {exc}\n")
-            return EvalOutcome(
-                passed=False,
-                output=None,
-                result=CallbackResult(
-                    passed=False, reason=f"{type(exc).__name__}: {exc}"
-                ),
+            return BotRunResult(
+                status=False,
+                result=None,
+                error=f"{type(exc).__name__}: {exc}"
             )
 
 
+@register_task("swebenchverified")
+class SweBenchVerified(EvalTask):
+    """SWE-bench-verified based evaluation task.
+
+    It takes the memory provided by the training agent and runs
+    all the selected SWE-bench-verified instances. Then provides
+    a combined score and feedback.
+    """
+
+    def __init__(self, config_file: Path) -> None:
+        super().__init__(config_file)
+        self.dataset: list[SweBenchInstance] = []
+        self.parse_config(config_file=config_file)
+
+    def repo_url(self) -> str:
+        """Return the URL of the repo for the training agent.
+
+        Returns:
+            str: The URL of the repo for the training agent.
+        """
+        return f"https://github.com/{self.dataset[0].repo}.git"
+
+    def teardown(self, eval_repo_path: Path) -> None:
+        """Tear down the task, cleaning up any resources if necessary."""
+        if eval_repo_path and eval_repo_path.exists():
+            shutil.rmtree(eval_repo_path)
+
+    def parse_config(self, config_file: Path) -> None:
+        """Parse the configuration file for the task.
+        The config file is a yaml file. It will have array of "instance_id"
+        or "repo" as the root object. Gather it and load the dataset to
+        the object variable dataset.
+
+        Args:
+            config_file (Path): Path to the configuration file.
+        """
+
+        with open(config_file, "r") as f:
+            config = yaml.safe_load(f)
+
+        instance_ids = config.get("instance_id_list", [])
+        repo = config.get("repo", None)
+
+        if instance_ids:
+            repo = None
+            for instance_id in instance_ids:
+                dataset = load_instance_using_id(instance_id)
+                if not repo:
+                    repo = dataset.repo
+                elif repo != dataset.repo:
+                    raise ValueError(
+                        f"Conflicting repos for instance_id {instance_id}: {repo} vs {dataset.repo}"
+                    )
+
+                self.dataset.append(dataset)
+
+        elif repo:
+            self.dataset = load_instances_of_repo(repo=repo)
+
+        if len(self.dataset) == 0:
+            raise ValueError("No instances loaded for evaluation.")
+
+    def eval(self, memory_dir: str, model: str, log_path: str) -> EvalOutcome:
+        """Runs the evaluation agent with the memory on all the eval instances
+        and produces a cumulative feedback.
+
+        Args:
+            memory_dir (str): Path to the directory containing the agent's memory.
+            model (str): The model identifier used for evaluation.
+            log_path (str): Path to the log file for recording evaluation details.
+
+        Returns:
+            EvalOutcome: The outcome of the evaluation, including whether it passed, the output, and the result.
+        """
+
+        eval_repo_path = Path(log_path).parent / "eval_repo"
+        results = []
+
+        for instance in self.dataset:
+            inst_log_path = Path(log_path).parent / f"{instance.instance_id}_log.txt"
+            task = SweBenchVerifiedTask_one(instance)
+
+            res = task.eval(str(eval_repo_path), memory_dir, model, str(inst_log_path))
+
+            if not res.status:
+                logger.info(f"Evaluation failed for instance {instance.instance_id}: {res.error if res.error else 'Unknown error'}")
+                results.append(res)
+            else:
+                res = task.check(str(eval_repo_path), "", str(inst_log_path))
+                results.append(res)
+
+        score = 0
+        for result in results:
+            if result.status:
+                score += 1
+
+        score = score / len(self.dataset)
+
+        if score == 1:
+            feedback = "All evaluations passed."
+        else:
+            feedback = self._combine_result_feedback(results, model, str(eval_repo_path))
+
+        self.teardown(eval_repo_path)
+
+        return EvalOutcome(
+            passed = score == 1,
+            score = score,
+            feedback = feedback
+        )
+
+
+    def _combine_result_feedback(self, results: list[BotRunResult], model: str, eval_repo: str) -> str:
+        """
+        Combines the feedback from multiple BotRunResult instances into a single feedback string.
+        Args:
+            results (list[BotRunResult]): List of individual bot run results.
+            model (str): The model identifier used for evaluation.
+            eval_repo (str): Path to the evaluation repository.
+
+        Returns:
+            str: Combined feedback from all results.
+        """
+
+        serialized_str = f"Total {len(results)} tests ran and their result and feedback:\n"
+
+        for res in results:
+            serialized_str += f"\nResult: {'Passed' if res.status else 'Failed'}\n"
+            serialized_str += f"Optional Feedback: {res.result if res.result else 'None'}\n"
+            serialized_str += f"Error if there are any: {res.error if res.error else 'None'}\n"
+
+        try:
+            bot = ReadingBot(
+                model = model,
+                folder_to_mount=eval_repo
+            )
+            task = f"""
+            Combine the results of the eval runs into single feedback.
+            This feedback will be given to the next iteration.
+            You just combine the results with minimal efforts.
+            Avoid referring to code whenever possible.
+
+            {serialized_str}
+            """
+            bot_result = bot.run(task=task)
+        except Exception as e:
+            logger.warning(f"Combining results failed with exception: {e}")
+            return f"Combining results failed. raw combined output:\n\n{serialized_str}"
+
+        if bot_result.status:
+            return bot_result.result if bot_result.result else 'No feedback provided'
+        else:
+            return f"Combining results failed. raw combined output:\n\n{serialized_str}"

@@ -54,12 +54,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--config-file", type=Path, help="Path to the task configuration file.",
     )
     parser.add_argument("--max-rounds", type=int, default=5)
-    parser.add_argument("--training-iterations", type=int, default=10)
 
     return parser.parse_args(argv)
 
 def main(argv: list[str] | None = None) -> None:
-    """CLI entry point: run training only, or the full train/eval loop.
+    """CLI entry point: run the full train/eval loop.
 
     Parameters
     ----------
@@ -68,6 +67,13 @@ def main(argv: list[str] | None = None) -> None:
     """
     args = parse_args(argv)
 
+    # The user can pass either an existing workdir containing a
+    # task_config.yml file or a task_config.yml file using --config
+    # option. In the later case, the workdir will be created in
+    # the default location.
+    # If both workdir and config options are provided and there exists
+    # a task_yaml.yml inside the workdir, that file will be ignored and
+    # the provided --config-file will take precedence.
     workdir = Path(args.workdir) if args.workdir else resolve_workdir()
     require_workdir(workdir)
 
@@ -83,7 +89,6 @@ def main(argv: list[str] | None = None) -> None:
         model=args.model,
         task=TASK_REGISTRY[args.task](config_file=config_file),
         max_rounds=args.max_rounds,
-        training_iterations=args.training_iterations,
     )
     if result is not None:
         logger.info(

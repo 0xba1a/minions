@@ -62,34 +62,6 @@ def register_task(name: str) -> Callable[[type[EvalTask]], type[EvalTask]]:
 
     return decorator
 
-def create_task(name: str) -> EvalTask:
-    """Construct the registered ``EvalTask`` for ``name``.
-
-    Tasks take no constructor arguments; per-run configuration is
-    applied afterwards via ``EvalTask.parse_config``.
-
-    Parameters
-    ----------
-    name : str
-        The registered task name, e.g. ``"swebenchverified"``.
-
-    Returns
-    -------
-    EvalTask
-        A new instance of the class registered under ``name``.
-
-    Raises
-    ------
-    ValueError
-        If ``name`` has not been registered via ``register_task``.
-    """
-    try:
-        task_cls = TASK_REGISTRY[name]
-    except KeyError:
-        raise ValueError(
-            f"Unknown task {name!r}. Registered tasks: {sorted(TASK_REGISTRY)}"
-        ) from None
-    return task_cls()
 
 def discover_tasks(package_name: str = "microbots.auto_memory.eval") -> None:
     """Import every module in ``package_name`` so ``@register_task`` fires.

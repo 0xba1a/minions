@@ -3,8 +3,8 @@
 from pathlib import Path
 
 from microbots.bot.ReadingBot import ReadingBot
-from microbots.tools.tool_definitions.memory_tool import MemoryTool
 from microbots.MicroBot import BotRunResult
+from microbots.tools.tool_definitions.memory_tool import MemoryTool
 
 _INSTRUCTIONS_PATH = Path(__file__).parent / "training_instructions.md"
 
@@ -14,8 +14,8 @@ def run_training(
     feedback: str,
     memory_dir: str,
     model: str,
-    max_iterations: int = 20,
-    timeout_in_seconds: int = 600,
+    max_iterations: int = 200,
+    timeout_in_seconds: int = 3600,
 ) -> BotRunResult:
     """Run one training pass over a repository and update its memory.
 
@@ -33,9 +33,9 @@ def run_training(
         Directory in which the memory tool stores its memory.
     model : str
         Model identifier used by the reading bot.
-    max_iterations : int, default=20
+    max_iterations : int, default=200
         Maximum number of bot iterations.
-    timeout_in_seconds : int, default=600
+    timeout_in_seconds : int, default=3600
         Maximum duration of the bot run in seconds.
 
     Returns

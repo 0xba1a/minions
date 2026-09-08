@@ -5,23 +5,43 @@ Centralizes every path this package reads or writes under a run's
 outputs), so callers never hard-code layout details themselves.
 """
 
-from pathlib import Path
+import os
 import shutil
-
-import yaml
+import time
+from pathlib import Path
 
 WORKDIR_NAME = "workdir"
-CONFIG_FILENAME = "config.yaml"
+CONFIG_FILENAME = "task_config.yaml"
 REPO_DIRNAME = "repo"
-EVAL_REPO_DIRNAME = "eval_repo"
 MEMORY_DIRNAME = "memory"
-MEMORY_SEED_DIRNAME = "memory_seed"
+"""
+At the beginning of the round, memory from memory_dir will be snapshotted
+inside the workdir/rounds/rounds_n/starting_memory_snapshot directory.
+So, the final memory after that round should be found at rounds_(n+1)
+directory. The memory of the final round will be available at the
+main memory dir workdir/memory
+"""
+STARTING_MEMORY_SNAPSHOT_DIR = "starting_memory_snapshot"
 ROUNDS_DIRNAME = "rounds"
-ROUND_LOG_FILENAME = "round.log"
-ROUND_PATCH_FILENAME = "repo.patch"
+ROUND_LOG_DIR= "logs"
 EVAL_DIRNAME = "eval"
 RESULT_FILENAME = "result.json"
-EVAL_LOG_FILENAME = "eval.log"
+
+"""
+Expected workdir structure:
+
+  workdir/
+  |
+   workdir/
+   ├── task_config.yaml
+   ├── repo/
+   ├── memory/
+   ├── rounds/round_n/
+   │   └── logs/  <-- Contains only training log. Eval logs can be found inside the eval task
+   │   └── eval/  <-- Managed by the eval task
+   │   └── starting_memory_snapshot/
+   └── logs/
+"""
 
 
 def resolve_workdir(base: Path | None = None) -> Path:
@@ -38,8 +58,6 @@ def resolve_workdir(base: Path | None = None) -> Path:
     Path
         ``workdir`` resolved relative to ``base`` (or ``Path.cwd()``).
     """
-    if base is not None and not base.is_absolute():
-        raise ValueError(f"base must be an absolute path: {base}")
     workdir = (base or Path.cwd()) / WORKDIR_NAME
     return workdir
 
@@ -55,7 +73,30 @@ def require_workdir(workdir: Path) -> None:
     """
     # create workdir if not existing
     if not workdir.exists():
-        workdir.mkdir(parents=True)
+        mem_dir = workdir / MEMORY_DIRNAME
+        mem_dir.mkdir(parents=True)
+        return
+
+    workdir_parent = workdir.parent
+    workdir_backup = workdir_parent / f"{workdir.name}_backup_{int(time.time())}"
+    shutil.move(str(workdir), str(workdir_backup))
+    workdir.mkdir(parents=True)
+
+    task_config = workdir_backup / CONFIG_FILENAME
+    if task_config.exists():
+        shutil.copy(task_config, workdir / CONFIG_FILENAME)
+    else:
+        raise FileNotFoundError(f"Task config file does not exist: {task_config}")
+
+    mem_dir = workdir_backup / MEMORY_DIRNAME
+    if mem_dir.exists():
+        shutil.copytree(mem_dir, workdir / MEMORY_DIRNAME)
+    else:
+        mem_dir.mkdir(parents=True)
+
+    repo_dir = workdir_backup / REPO_DIRNAME
+    if repo_dir.exists():
+        shutil.copytree(repo_dir, workdir / REPO_DIRNAME)
 
 
 def config_path(workdir: Path) -> Path:
@@ -72,26 +113,6 @@ def config_path(workdir: Path) -> Path:
         ``workdir/config.yaml``.
     """
     return workdir / CONFIG_FILENAME
-
-
-def load_config(workdir: Path) -> dict:
-    """Load and parse ``workdir``'s config file.
-
-    Parameters
-    ----------
-    workdir : Path
-        The workdir whose config file should be loaded.
-
-    Returns
-    -------
-    dict
-        The parsed config, or ``{}`` if the config file doesn't exist
-        or is empty.
-    """
-    path = config_path(workdir)
-    if not path.is_file():
-        return {}
-    return yaml.safe_load(path.read_text()) or {}
 
 
 def repo_dir(workdir: Path) -> Path:
@@ -123,7 +144,7 @@ def memory_dir(workdir: Path) -> Path:
     Parameters
     ----------
     workdir : Path
-        The run's workdir.
+    The run's workdir.
 
     Returns
     -------
@@ -133,46 +154,30 @@ def memory_dir(workdir: Path) -> Path:
     return workdir / MEMORY_DIRNAME
 
 
-def snapshot_seed_memory(workdir: Path) -> Path:
-    """Snapshot the current top-level memory dir as the run's restorable baseline.
-
-    ``memory_dir`` is shared and mutated in place across every
-    training/eval round and every eval task instance (so later
-    instances benefit from what earlier ones learned), which means the
-    original, pre-run memory is otherwise overwritten and lost with no
-    way to get back to it. Call this once, before anything trains,
-    to preserve that original state at ``workdir/memory_seed``. A
-    no-op if a snapshot already exists, so later calls (e.g. once per
-    eval task instance in the same run) never clobber the very first
-    snapshot with already-mutated memory.
+def take_memory_snapshot(mem_dir: Path, round_idx: int) -> None:
+    """Take a snapshot of the current memory directory for a specific round.
 
     Parameters
     ----------
-    workdir : Path
-        The run's workdir.
-
-    Returns
-    -------
-    Path
-        ``workdir/memory_seed``, containing a copy of whatever
-        ``memory_dir`` held the first time this was called (or empty,
-        if there was no pre-existing memory).
+    mem_dir : Path
+        The path to the current top-level memory directory.
+    round_idx : int
+        The 1-based round number.
     """
-    dst = workdir / MEMORY_SEED_DIRNAME
-    if dst.exists():
-        return dst
-    src = memory_dir(workdir)
-    if src.is_dir():
-        shutil.copytree(src, dst)
-    else:
-        dst.mkdir(parents=True, exist_ok=True)
-    return dst
+    if not mem_dir.exists():
+        # At this point, mem_dir can be empty but it should exist
+        raise FileNotFoundError(f"Memory directory does not exist: {mem_dir}")
+
+    workdir = Path(mem_dir).parent
+    snapshot_dir = round_dir(workdir, round_idx) / STARTING_MEMORY_SNAPSHOT_DIR
+    if os.path.exists(snapshot_dir):
+        shutil.rmtree(snapshot_dir)
+    shutil.copytree(mem_dir, snapshot_dir)
 
 
 def round_dir(
-    workdir: Path, round_num: int, *, instance_id: str | None = None, create: bool = False
-) -> Path:
-    """Return (and optionally create) the directory for a training round.
+    workdir: Path, round_num: int) -> Path:
+    """Create and return the directory for a training round.
 
     Parameters
     ----------
@@ -180,120 +185,18 @@ def round_dir(
         The run's workdir.
     round_num : int
         1-based round number.
-    instance_id : str | None
-        If given, rounds are kept under a per-instance rounds dir
-        (``rounds_{instance_id}``) instead of the shared ``rounds`` dir,
-        so different eval task instances sharing the same ``workdir``
-        don't collide on round numbers. Pass the eval task's
-        ``task_id`` when running an eval task; omit for training-only
-        mode.
-    create : bool
-        If True, create the directory (and parents) if missing.
 
     Returns
     -------
     Path
-        ``workdir/rounds/round_{round_num}`` (no ``instance_id``), or
-        ``workdir/rounds_{instance_id}/round_{round_num}``.
+        ``workdir/rounds/round_{round_num}``
     """
-    rounds_dirname = f"{ROUNDS_DIRNAME}_{instance_id}" if instance_id else ROUNDS_DIRNAME
-    path = workdir / rounds_dirname / f"round_{round_num}"
-    if create:
-        path.mkdir(parents=True, exist_ok=True)
+    path = workdir / ROUNDS_DIRNAME / f"round_{round_num}"
+    path.mkdir(parents=True, exist_ok=True)
     return path
 
 
-def round_memory_dir(workdir: Path, round_num: int, *, instance_id: str | None = None) -> Path:
-    """Return the path to a round's own memory snapshot (a directory).
-
-    Parameters
-    ----------
-    workdir : Path
-        The run's workdir.
-    round_num : int
-        1-based round number.
-    instance_id : str | None
-        The eval task's ``task_id``, if running an eval task (see
-        ``round_dir``). Omit for training-only mode.
-
-    Returns
-    -------
-    Path
-        This round's own memory directory.
-    """
-    return round_dir(workdir, round_num, instance_id=instance_id) / MEMORY_DIRNAME
-
-
-def load_round_memory(workdir: Path, round_num: int, *, instance_id: str | None = None) -> Path:
-    """Copy the current top-level memory into this round's own memory dir.
-
-    Called before a round's training pass, so it starts from whatever
-    memory the previous round left behind (or empty, on round 1). This
-    round's memory dir is replaced, not merged into: any stale files
-    left behind by a previous attempt at this same round (e.g. a
-    crashed/re-run process) are discarded first, so the round always
-    starts from an exact snapshot of the current top-level memory.
-
-    Parameters
-    ----------
-    workdir : Path
-        The run's workdir.
-    round_num : int
-        1-based round number to load memory into.
-    instance_id : str | None
-        The eval task's ``task_id``, if running an eval task (see
-        ``round_dir``). Omit for training-only mode.
-
-    Returns
-    -------
-    Path
-        This round's own memory dir, ready for the round to use.
-    """
-    src = memory_dir(workdir)
-    dst = round_memory_dir(workdir, round_num, instance_id=instance_id)
-    shutil.rmtree(dst, ignore_errors=True)
-    if src.is_dir():
-        shutil.copytree(src, dst)
-    else:
-        dst.mkdir(parents=True, exist_ok=True)
-    return dst
-
-
-def save_round_memory(workdir: Path, round_num: int, *, instance_id: str | None = None) -> Path:
-    """Copy this round's memory back up to the top-level memory dir.
-
-    Called after a round's training pass, so later rounds (and the
-    final saved memory) see what this round learned. The top-level
-    memory dir is replaced, not merged into: files the round deleted
-    (e.g. via the agent's ``memory delete`` command) are gone from
-    the top level too, instead of surviving from a previous save.
-
-    Parameters
-    ----------
-    workdir : Path
-        The run's workdir.
-    round_num : int
-        1-based round number whose memory should be saved.
-    instance_id : str | None
-        The eval task's ``task_id``, if running an eval task (see
-        ``round_dir``). Omit for training-only mode.
-
-    Returns
-    -------
-    Path
-        The top-level ``memory`` dir, now updated with this round's changes.
-    """
-    src = round_memory_dir(workdir, round_num, instance_id=instance_id)
-    dst = memory_dir(workdir)
-    shutil.rmtree(dst, ignore_errors=True)
-    if src.is_dir():
-        shutil.copytree(src, dst)
-    else:
-        dst.mkdir(parents=True, exist_ok=True)
-    return dst
-
-
-def round_log_path(workdir: Path, round_num: int, *, instance_id: str | None = None) -> Path:
+def round_log_dir(workdir: Path, round_num: int) -> Path:
     """Return the path to a round's training log.
 
     Parameters
@@ -302,22 +205,19 @@ def round_log_path(workdir: Path, round_num: int, *, instance_id: str | None = N
         The run's workdir.
     round_num : int
         1-based round number.
-    instance_id : str | None
-        The eval task's ``task_id``, if running an eval task (see
-        ``round_dir``). Omit for training-only mode.
 
     Returns
     -------
     Path
-        This round's ``round.log``.
+        This round's log directory. Both training and eval logs
+        can be found inside with appropriate file names
     """
-    return round_dir(workdir, round_num, instance_id=instance_id) / ROUND_LOG_FILENAME
+    return round_dir(workdir, round_num) / ROUND_LOG_DIR
 
 
-def eval_dir(
-    workdir: Path, round_num: int, instance_id: str, *, create: bool = False
-) -> Path:
-    """Return (and optionally create) an eval task instance's eval directory.
+def get_eval_dir(
+    workdir: Path, round_num: int) -> Path:
+    """Return the eval task instance's eval directory. Creates it if missing.
 
     Parameters
     ----------
@@ -325,77 +225,12 @@ def eval_dir(
         The run's workdir.
     round_num : int
         1-based round number this eval instance belongs to.
-    instance_id : str
-        The eval task instance identifier.
-    create : bool
-        If True, create the directory (and parents) if missing.
 
     Returns
     -------
     Path
-        ``workdir/rounds_{instance_id}/round_{round_num}/eval``.
+        ``workdir/rounds/round_{round_num}/eval``.
     """
-    path = round_dir(workdir, round_num, instance_id=instance_id) / EVAL_DIRNAME
-    if create:
-        path.mkdir(parents=True, exist_ok=True)
+    path = round_dir(workdir, round_num) / EVAL_DIRNAME
+    path.mkdir(parents=True, exist_ok=True)
     return path
-
-
-def eval_result_path(workdir: Path, round_num: int, instance_id: str) -> Path:
-    """Return the path to an eval instance's result file.
-
-    Parameters
-    ----------
-    workdir : Path
-        The run's workdir.
-    round_num : int
-        1-based round number this eval instance belongs to.
-    instance_id : str
-        The eval task instance identifier.
-
-    Returns
-    -------
-    Path
-        This eval instance's ``result.json``.
-    """
-    return eval_dir(workdir, round_num, instance_id) / RESULT_FILENAME
-
-
-def eval_log_path(workdir: Path, round_num: int, instance_id: str) -> Path:
-    """Return the path to an eval instance's log file.
-
-    Parameters
-    ----------
-    workdir : Path
-        The run's workdir.
-    round_num : int
-        1-based round number this eval instance belongs to.
-    instance_id : str
-        The eval task instance identifier.
-
-    Returns
-    -------
-    Path
-        This eval instance's ``eval.log``.
-    """
-    return eval_dir(workdir, round_num, instance_id) / EVAL_LOG_FILENAME
-
-
-def eval_patch_path(workdir: Path, round_num: int, instance_id: str) -> Path:
-    """Return the path to an eval instance's captured repo diff.
-
-    Parameters
-    ----------
-    workdir : Path
-        The run's workdir.
-    round_num : int
-        1-based round number this eval instance belongs to.
-    instance_id : str
-        The eval task instance identifier.
-
-    Returns
-    -------
-    Path
-        This eval instance's ``repo.patch``.
-    """
-    return eval_dir(workdir, round_num, instance_id) / ROUND_PATCH_FILENAME

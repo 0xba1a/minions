@@ -5,23 +5,22 @@ feedback and retrains via the training agent, looping until the task
 passes or ``max_rounds`` is exhausted.
 """
 
-from dataclasses import dataclass, field
 import dataclasses
-from logging import getLogger
-from pathlib import Path
 import json
 import shutil
 import subprocess
+from dataclasses import dataclass, field
+from logging import getLogger
+from pathlib import Path
 
 from microbots.auto_memory.evalTask import EvalOutcome, EvalTask
 from microbots.auto_memory.training.runner import run_training
 from microbots.auto_memory.workdir import (
-    eval_log_path,
-    eval_result_path,
-    load_round_memory,
+    RESULT_FILENAME,
+    get_eval_dir,
+    memory_dir,
     repo_dir,
-    save_round_memory,
-    snapshot_seed_memory,
+    take_memory_snapshot,
 )
 
 logger = getLogger(__name__)
@@ -83,63 +82,20 @@ def clone_repo(url: str, repo_path: Path) -> None:
 
     subprocess.run(["git", "clone", url, str(repo_path)], check=True)
 
-def write_eval_result(workdir: Path, round_num: int, task: EvalTask, outcome: EvalOutcome) -> None:
+def write_eval_result(eval_dir: Path, outcome: EvalOutcome) -> None:
     """Write a round's eval result to ``result.json``.
 
     Parameters
     ----------
-    workdir : Path
-        The run's workdir.
-    round_num : int
-        1-based round number this outcome belongs to.
-    task : EvalTask
-        The task that produced ``outcome``, used for both its
-        ``task_id`` (folder name) and ``build_result`` (file content).
+    eval_dir : Path
+        The directory for this round's evaluation.
     outcome : EvalOutcome
         The round's outcome to persist.
     """
-    path = eval_result_path(workdir, round_num, task.task_id)
+    path = eval_dir / RESULT_FILENAME
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(dataclasses.asdict(outcome), indent=2))
 
-def run_training_loop(
-    repo_path: str,
-    feedback: str,
-    memory_dir: str,
-    model: str,
-    iterations: int = 10,
-) -> None:
-    """Run ``run_training`` ``iterations`` times, reusing the same memory dir.
-
-    Shared by the eval-loop's retrain step and any training-only entry
-    point (e.g. a CLI) that needs to run training without an eval task.
-
-    Parameters
-    ----------
-    repo_path : str
-        Absolute path to the repo to train against.
-    feedback : str
-        Feedback from a prior failed eval attempt, or ``""`` if none.
-    memory_dir : str
-        Directory where the training agent reads/writes memory files.
-    model : str
-        The model to use, in the format ``<provider>/<model_name>``.
-    iterations : int
-        Number of training passes to run, each reusing the same
-        ``memory_dir``. Defaults to 10.
-    """
-    for iteration in range(1, iterations + 1):
-        logger.info(
-            "run_training_loop: training iteration %d/%d",
-            iteration,
-            iterations,
-        )
-        run_training(
-            repo_path=repo_path,
-            feedback=feedback,
-            memory_dir=memory_dir,
-            model=model,
-        )
 
 def run_train_eval_loop(
     training_repo_path: str,
@@ -147,7 +103,6 @@ def run_train_eval_loop(
     model: str,
     task: EvalTask,
     max_rounds: int = 5,
-    training_iterations: int = 10,
 ) -> LoopResult:
     """Run an eval task in a loop, retraining on failure until it passes.
 
@@ -174,10 +129,9 @@ def run_train_eval_loop(
         retraining (``run_training_loop``). Kept separate from
         ``eval_repo_path`` since the task manages the latter's
         lifecycle itself (clone/teardown each round).
-    eval_repo_path : str
-        Absolute path to the repo the task clones/manages itself (via
-        its own ``setup``) and runs/checks the agent against each
-        round.
+    training_repo_path : str
+        Absolute path to the persistent repo checkout used only for
+        retraining (``run_training_loop``).
     workdir : Path
         This run's workdir, used to carry memory forward between rounds
         (see ``microbots.auto_memory.workdir``).
@@ -187,9 +141,6 @@ def run_train_eval_loop(
         The eval task to run each round.
     max_rounds : int
         Maximum number of train/eval rounds to attempt. Defaults to 5.
-    training_iterations : int
-        Number of training passes to run per retraining round, each
-        reusing the same round memory dir. Defaults to 10.
 
     Returns
     -------
@@ -207,15 +158,27 @@ def run_train_eval_loop(
 
     outcomes: list[EvalOutcome] = []
 
+    #TODO: Logs need to be saved to appropriate log files
     for round_idx in range(1, max_rounds+1):
         logger.info(
             "run_train_eval_loop: round %d/%d starting", round_idx, max_rounds
         )
-        # TODO: Instead of loading new memory dir on every iteration, snapshot the memory.
-        memory_dir = str(load_round_memory(workdir, round_idx, instance_id=task.task_id))
-        log_path = str(eval_log_path(workdir, round_idx, task.task_id))
-        outcome = task.eval(memory_dir, model, log_path)
-        outcomes.append(outcome)
+        mem_dir = memory_dir(Path(workdir))
+        eval_dir = get_eval_dir(workdir, round_idx)
+        take_memory_snapshot(mem_dir, round_idx)
+        try:
+            outcome = task.eval(str(mem_dir), model, str(eval_dir))
+            outcomes.append(outcome)
+        except Exception as e:
+            logger.warning(
+                "run_train_eval_loop: round %d failed during evaluation;\n"
+                "Exception: %s\n"
+                "continuing to next round",
+                round_idx, e
+            )
+            # Store the failure in outcomes
+            outcomes.append(EvalOutcome(passed=False, score=-1, feedback=str(e)))
+            continue
 
         try:
             if outcome.passed:
@@ -234,14 +197,14 @@ def run_train_eval_loop(
                 round_idx,
                 outcome.feedback,
             )
+
             try:
-                run_training_loop(
+                run_training(
                     repo_path=training_repo_path,
                     feedback=outcome.feedback,
-                    memory_dir=memory_dir,
+                    memory_dir=str(mem_dir),
                     model=model,
-                    iterations=training_iterations,
-                )
+            )
             except Exception:
                 logger.exception(
                     "run_train_eval_loop: round %d failed to build feedback/retrain; "
@@ -249,8 +212,7 @@ def run_train_eval_loop(
                     round_idx,
                 )
         finally:
-            write_eval_result(workdir, round_idx, task, outcome)
-            save_round_memory(workdir, round_idx, instance_id=task.task_id)
+            write_eval_result(eval_dir, outcome)
 
     logger.info(
         "run_train_eval_loop: exhausted %d rounds without passing", max_rounds
@@ -267,7 +229,6 @@ def run(
     model: str,
     task: EvalTask,
     max_rounds: int = 5,
-    training_iterations: int = 10,
 ) -> LoopResult:
     """Run full train/eval loop, depending on ``task``.
 
@@ -300,11 +261,9 @@ def run(
         must be configured even for tasks like ``SweBenchVerifiedTask``
         that manage their own separate eval checkout.
     """
-    clone_repo(task.repo_url(), repo_dir(workdir))
-
-    snapshot_seed_memory(workdir)
-
-    training_repo_path = str(repo_dir(workdir))
+    training_repo_dir = repo_dir(workdir)
+    clone_repo(task.repo_url(), training_repo_dir)
+    training_repo_path = str(training_repo_dir)
 
     # TODO: train-only mode will be implemented if required after proper design
     # if task is None:
@@ -327,5 +286,4 @@ def run(
         model=model,
         task=task,
         max_rounds=max_rounds,
-        training_iterations=training_iterations,
     )

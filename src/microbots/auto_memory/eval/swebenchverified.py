@@ -395,7 +395,6 @@ class SweBenchVerifiedTask_one():
                 error=f"{type(exc).__name__}: {exc}"
             )
 
-
 @register_task("swebenchverified")
 class SweBenchVerified(EvalTask):
     """SWE-bench-verified based evaluation task.
@@ -406,7 +405,7 @@ class SweBenchVerified(EvalTask):
     """
 
     def __init__(self, config_file: Path) -> None:
-        super().__init__(config_file)
+        # No need to call the base-class init
         self.dataset: list[SweBenchInstance] = []
         self.parse_config(config_file=config_file)
 
@@ -417,11 +416,6 @@ class SweBenchVerified(EvalTask):
             str: The URL of the repo for the training agent.
         """
         return f"https://github.com/{self.dataset[0].repo}.git"
-
-    def teardown(self, eval_repo_path: Path) -> None:
-        """Tear down the task, cleaning up any resources if necessary."""
-        if eval_repo_path and eval_repo_path.exists():
-            shutil.rmtree(eval_repo_path)
 
     def parse_config(self, config_file: Path) -> None:
         """Parse the configuration file for the task.
@@ -458,7 +452,7 @@ class SweBenchVerified(EvalTask):
         if len(self.dataset) == 0:
             raise ValueError("No instances loaded for evaluation.")
 
-    def eval(self, memory_dir: str, model: str, log_path: str) -> EvalOutcome:
+    def eval(self, memory_dir: str, model: str, eval_dir: str) -> EvalOutcome:
         """Runs the evaluation agent with the memory on all the eval instances
         and produces a cumulative feedback.
 
@@ -470,12 +464,13 @@ class SweBenchVerified(EvalTask):
         Returns:
             EvalOutcome: The outcome of the evaluation, including whether it passed, the output, and the result.
         """
-
-        eval_repo_path = Path(log_path).parent / "eval_repo"
+        eval_path = Path(eval_dir)
+        eval_repo_path = eval_path / "eval_repo"
+        eval_log_dir = eval_path / "logs"
         results = []
 
         for instance in self.dataset:
-            inst_log_path = Path(log_path).parent / f"{instance.instance_id}_log.txt"
+            inst_log_path = eval_log_dir / f"{instance.instance_id}_log.txt"
             task = SweBenchVerifiedTask_one(instance)
 
             res = task.eval(str(eval_repo_path), memory_dir, model, str(inst_log_path))
@@ -499,14 +494,13 @@ class SweBenchVerified(EvalTask):
         else:
             feedback = self._combine_result_feedback(results, model, str(eval_repo_path))
 
-        self.teardown(eval_repo_path)
+        # NOTE: Let's not teardown the repository as it will be useful for debugging
 
         return EvalOutcome(
             passed = score == 1,
             score = score,
             feedback = feedback
         )
-
 
     def _combine_result_feedback(self, results: list[BotRunResult], model: str, eval_repo: str) -> str:
         """

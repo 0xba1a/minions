@@ -8,7 +8,8 @@ clean up afterward.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+
+import yaml
 
 
 @dataclass
@@ -41,51 +42,15 @@ class EvalTask(ABC):
 
     def __init__(self, config_file: Path) -> None:
         super().__init__()
+        self.parse_config(config_file=config_file)
 
-    @abstractmethod
     def repo_url(self) -> str:
         """Return the URL of the repo for the training agent."""
+        if not self._repo_url:
+            raise ValueError("Repo URL is not set in the config file."
+                             " Or you didn't override the base method.")
+        return self._repo_url
 
-    @property
-    def task_id(self) -> str:
-        """Identifier for this task instance, used to name its output folder.
-
-        Defaults to the class name, which is fine for tasks with only
-        one instance per run. Override for tasks with several distinct
-        instances per class (e.g. ``SweBenchVerifiedTask``, where each
-        dataset row needs its own folder).
-
-        Returns
-        -------
-        str
-            This task instance's identifier.
-        """
-        return type(self).__name__
-
-    def setup(self) -> None:
-        """Optional. Prepare repo/environment before the agent runs.
-
-        Not called automatically; only useful if your ``run``
-        implementation calls it.
-
-        Parameters
-        ----------
-        repo_path : str
-            Absolute path to the repo to prepare.
-        """
-        pass
-
-    def teardown(self, eval_repo_path: Path) -> None:
-        """Optional. Clean up anything setup() created.
-
-        Parameters
-        ----------
-        eval_repo_path : Path
-            Absolute path to the repo that was prepared by ``setup``.
-        """
-        pass
-
-    @abstractmethod
     def parse_config(self, config_file: Path) -> None:
         """Parse the task-specific config file. Importantly it
         parses the config file and get the repo for the training
@@ -96,9 +61,12 @@ class EvalTask(ABC):
         config_file : Path
             Path to the config file to parse.
         """
+        with open(config_file, "r") as f:
+            config = yaml.safe_load(f)
+            self._repo_url = config.get("repo")
 
     @abstractmethod
-    def eval(self, memory_dir: str, model: str, log_path: str) -> EvalOutcome:
+    def eval(self, memory_dir: str, model: str, eval_dir: str) -> EvalOutcome:
         """Required. Run one eval iteration and return its outcome.
 
         Parameters
@@ -108,10 +76,9 @@ class EvalTask(ABC):
             ``MemoryTool``.
         model : str
             The model to use, in the format ``<provider>/<model_name>``.
-        log_path : str
-            Path to write this round's log to. Caller-provided (e.g. a
-            workdir-managed path) so logs persist under the run's
-            layout instead of each task inventing its own temp file.
+        eval_dir: str
+            Path to run this round's eval. This directory is managed by
+            the eval task itself. It can have its cloned repo, logs, etc.
 
         Returns
         -------

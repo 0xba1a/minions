@@ -358,7 +358,11 @@ class SweBenchVerifiedTask_one:
                 folder_to_mount=repo_path,
                 additional_tools=[MemoryTool(memory_dir=memory_dir)],
             )
-            bot_result = bot.run(prompt)
+            bot_result = bot.run(
+                prompt,
+                max_iterations=40,
+                timeout_in_seconds=1800
+                )
 
             with open(log_path, "a") as f:
                 f.write(f"Agent output:\n{bot_result.result}\n")

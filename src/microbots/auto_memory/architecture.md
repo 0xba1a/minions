@@ -1,9 +1,9 @@
 # auto_memory — Architecture
 
 An agent that **learns a repository into memory notes**, then **proves those notes work** by
-solving a real task with them. If it fails, it learns again from the failure and retries.
+solving real SWE-bench issues with them. If it fails, it learns from the failure and retries.
 
-> Train → Eval → Feedback → Train → … until pass (or rounds run out).
+> Train → Eval → Feedback → Train → … until every instance passes (or rounds run out).
 
 ---
 
@@ -11,23 +11,23 @@ solving a real task with them. If it fails, it learns again from the failure and
 
 ```mermaid
 flowchart LR
-    subgraph LOOP["Train / Eval Loop"]
+    CLI["cli.py<br/>--model --task --config-file --max-rounds"] --> LOOP
+
+    subgraph LOOP["orchestrator: train / eval loop"]
         direction TB
-        T["🧠 TRAIN<br/>ReadingBot reads the repo<br/>writes notes to memory/"]
-        E["🎯 EVAL<br/>WritingBot solves a task<br/>using only those notes"]
-        C{"Passed?"}
-        F["🔍 FEEDBACK<br/>LogAnalysisBot reads the failure log<br/>says what the notes were missing"]
+        E["🎯 EVAL<br/>WritingBot solves each instance<br/>using only the memory notes"]
+        C{"All resolved?"}
+        F["🔍 FEEDBACK<br/>ReadingBot combines every<br/>instance result into one message"]
+        T["🧠 TRAIN<br/>ReadingBot re-reads the repo<br/>and rewrites memory/"]
 
         E --> C
         C -- "yes" --> DONE(["✅ Done"])
         C -- "no" --> F --> T --> E
     end
-
-    CLI["cli.py<br/>--model --task --max-rounds"] --> LOOP
 ```
 
-**Key idea:** the eval agent gets *no* extra hints — only the memory notes.
-So a failing eval is direct evidence the notes are wrong or incomplete.
+**Key idea:** the eval agent gets *no* hints beyond the memory notes.
+A failing eval is therefore direct evidence the notes are wrong or incomplete.
 
 ---
 
@@ -35,12 +35,12 @@ So a failing eval is direct evidence the notes are wrong or incomplete.
 
 | File | Role | One-liner |
 |---|---|---|
-| `cli.py` | Entry point | Parses args, builds tasks, calls the orchestrator |
-| `orchestrator.py` | Conductor | Owns the round loop, clones repo, wires train ↔ eval |
-| `evalTask.py` | Contract | Abstract `EvalTask`: `run`, `check`, `build_feedback`, … |
-| `task_registry.py` | Plugin table | `@register_task("name")` + auto-import of `eval/*` |
-| `eval/swebenchverified.py` | A real task | One SWE-bench-Verified issue, graded by the official harness |
-| `training/runner.py` | Trainer | One `ReadingBot` pass + `MemoryTool` |
+| `cli.py` | Entry point | Resolves the workdir + config, builds the task, calls the orchestrator |
+| `orchestrator.py` | Conductor | Clones the training repo, owns the round loop, wires eval ↔ training |
+| `evalTask.py` | Contract | `EvalTask`: `parse_config`, `repo_url`, `eval` → `EvalOutcome` |
+| `task_registry.py` | Plugin table | `@register_task("name")` + auto-import of everything in `eval/` |
+| `eval/swebenchverified.py` | The task | A **set** of SWE-bench-Verified instances, graded by the official harness |
+| `training/runner.py` | Trainer | One `ReadingBot` pass with a `MemoryTool` |
 | `training/training_instructions.md` | Trainer's brief | "Learn the repo, write notes, never edit code" |
 | `workdir.py` | Filing clerk | Every path under `workdir/` lives here — nothing is hard-coded elsewhere |
 
@@ -53,64 +53,69 @@ sequenceDiagram
     autonumber
     participant O as orchestrator
     participant W as workdir
-    participant Task as EvalTask
-    participant Bot as WritingBot
-    participant Train as run_training_loop
+    participant T as SweBenchVerified
+    participant One as per-instance task
+    participant Train as run_training
 
-    O->>W: load_round_memory(round N)
-    Note over W: copy memory/ ➜ rounds_<id>/round_N/memory
-    O->>Task: run(eval_repo, memory_dir, model, log)
-    Task->>Task: setup() – clone/reset repo @ base commit
-    Task->>Bot: build_prompt() + MemoryTool(memory_dir)
-    Bot-->>Task: patch in repo + output
-    Task->>Task: check() – grade it (SWE-bench harness)
-    Task-->>O: EvalOutcome(passed, output, result)
+    O->>W: take_memory_snapshot(round N)
+    Note over W: copy memory/ ➜ round_N/starting_memory_snapshot
+    O->>T: eval(memory_dir, model, eval_dir)
 
-    alt passed
-        O-->>O: return LoopResult(passed=True)
-    else failed
-        O->>Task: build_feedback(outcome, log)
-        Task-->>O: "your notes were missing X"
-        O->>Train: run_training_loop(feedback, memory_dir) × iterations
-        Train-->>W: notes updated in place
+    loop every configured instance
+        T->>One: eval(...)
+        One->>One: setup() – clone/reset repo @ base commit
+        One->>One: WritingBot + MemoryTool(memory_dir)
+        One-->>T: BotRunResult (patch left in the checkout)
+        T->>One: check() – git diff ➜ SWE-bench harness
+        One-->>T: resolved / not resolved (+ test_output.txt)
     end
 
-    O->>W: write result.json + save_round_memory(round N)
-    Note over W: copy round memory ➜ back up to memory/
+    T-->>O: EvalOutcome(passed, score, feedback)
+
+    alt every instance resolved
+        O-->>O: return LoopResult(passed=True)
+    else some failed
+        O->>Train: run_training(feedback, memory_dir)
+        Train-->>W: memory/ rewritten in place
+    end
+
+    O->>W: write result.json
 ```
+
+`score` is the **fraction of instances resolved**; `passed` is true only when it reaches `1.0`.
+An eval that raises is caught, recorded as `score = -1`, and the loop moves on — one bad
+round never discards the rounds before it.
 
 ---
 
-## 4. Memory Lifecycle (the heart of it)
+## 4. Memory Lifecycle
 
-Memory is a **directory of markdown notes** that is copied down into each round,
-mutated by the bots, then copied back up.
+Memory is a **directory of markdown notes** with a single home. It is mutated in place;
+each round snapshots its starting state so nothing is lost.
 
 ```mermaid
 flowchart TD
-    SEED["workdir/memory_seed/<br/><i>immutable baseline snapshot</i>"]
-    TOP["workdir/memory/<br/><b>current best notes</b>"]
-    R1["round_1/memory"]
-    R2["round_2/memory"]
-    R3["round_N/memory"]
+    TOP["workdir/memory/<br/><b>the notes being optimized</b>"]
+    S1["round_1/starting_memory_snapshot"]
+    S2["round_2/starting_memory_snapshot"]
+    S3["round_N/starting_memory_snapshot"]
 
-    TOP -. "snapshot once, at run start" .-> SEED
-    TOP -->|load_round_memory| R1
-    R1 -->|save_round_memory| TOP
-    TOP -->|load_round_memory| R2
-    R2 -->|save_round_memory| TOP
-    TOP -->|load_round_memory| R3
-    R3 -->|save_round_memory| TOP
+    TOP -->|"snapshot at round start"| S1
+    S1 -.->|"eval reads, training rewrites"| TOP
+    TOP -->|"snapshot at round start"| S2
+    S2 -.->|"eval reads, training rewrites"| TOP
+    TOP -->|"snapshot at round start"| S3
+    S3 -.->|"eval reads, training rewrites"| TOP
 ```
 
 Rules that matter:
 
-- **Replace, never merge.** `load`/`save` do `rmtree` + `copytree`, so deleted notes stay deleted
-  and stale files from a crashed round can't leak in.
-- **`memory_seed` is written once.** It preserves the pre-run state, because `memory/` is
-  mutated in place all run long.
-- **Memory carries across tasks.** Multiple task instances in one workdir share `memory/`,
-  so later instances inherit what earlier ones learned.
+- **One live copy.** Both the eval agent and the training agent point at `workdir/memory`.
+- **Snapshots are read-only history.** `round_N/starting_memory_snapshot` is what round N began with,
+  so you can diff what a round actually learned.
+- **Re-running archives, it doesn't append.** `require_workdir` moves the old workdir to
+  `workdir_backup_<timestamp>` and carries `task_config.yaml`, `memory/` and `repo/` forward,
+  so a new run resumes from prior knowledge with clean round output.
 
 ---
 
@@ -118,69 +123,62 @@ Rules that matter:
 
 ```text
 workdir/
-├── config.yaml            # repo URL + task_args
-├── repo/                  # persistent clone — TRAINING only
-├── eval_repo/             # task-managed clone — EVAL only (reset each round)
-├── memory_seed/           # baseline snapshot (write-once)
-├── memory/                # current best notes  ← the thing being optimized
-└── rounds_<task_id>/      # per-task-instance, so instances never collide
-    └── round_N/
-        ├── memory/        # this round's working copy of the notes
-        └── eval/
-            ├── eval.log   # agent output + harness logs (feeds LogAnalysisBot)
-            └── result.json
+├── task_config.yaml       # instance_id_list: [...]  or  repo: django/django
+├── repo/                  # training checkout, reused across rounds
+├── memory/                # the notes being optimized  ← the thing under test
+└── rounds/round_N/
+    ├── starting_memory_snapshot/   # memory/ as it looked when the round began
+    ├── logs/                       # training logs
+    └── eval/                       # owned entirely by the eval task
+        ├── eval_repo/              # shared checkout, reset per instance
+        ├── logs/<instance_id>_log.txt
+        └── result.json
 ```
 
-Two repos on purpose: the eval task wipes/resets its checkout every round, which
-would otherwise destroy the training checkout.
+Two checkouts on purpose: the eval task resets `eval_repo/` for every instance, which would
+otherwise destroy the training checkout in `repo/`.
 
 ---
 
-## 6. Two Modes
-
-```mermaid
-flowchart LR
-    A["orchestrator.run(task=?)"]
-    A -->|"task is None"| B["Train-only<br/>N training passes, empty feedback<br/>round 1 is just a scratch dir"]
-    A -->|"task given"| C["run_train_eval_loop<br/>up to max_rounds"]
-```
+## 6. Running It
 
 ```bash
-# train only
-python -m microbots.auto_memory.cli --model azure-openai/gpt-5.5
+# task_config.yaml selects the eval set, by ID list...
+#   instance_id_list:
+#     - django__django-11099
+# ...or by repo:
+#   repo: django/django
 
-# train + eval against a SWE-bench instance
 python -m microbots.auto_memory.cli \
     --model azure-openai/gpt-5.5 \
     --task swebenchverified \
-    --max-rounds 5 --training-iterations 10
+    --workdir ./workdir \
+    --max-rounds 5
 ```
+
+All instances in one config must belong to the **same repo** — that repo is what the training
+agent learns, and `SweBenchVerified.repo_url()` derives it from the dataset.
 
 ---
 
 ## 7. Adding a New Eval Task
 
-Drop a module in `eval/` — `discover_tasks()` imports everything in that package,
-so the `@register_task` decorator fires and the name shows up in `--task`. No central
-factory to edit.
+Drop a module in `eval/`. `discover_tasks()` imports everything in that package, so the
+`@register_task` decorator fires and the name appears in `--task`. No central factory to edit.
 
 ```python
 @register_task("mytask")
 class MyTask(EvalTask):
-    @classmethod
-    def from_config(cls, task_args: dict) -> list["EvalTask"]:
-        ...   # one instance per unit of work
+    def parse_config(self, config_file: Path) -> None:
+        ...   # load your settings; set self._repo_url or override repo_url()
 
-    def run(self, repo_path, memory_dir, model, log_path) -> EvalOutcome:
-        ...   # you drive setup/build_prompt/check yourself
-
-    def build_feedback(self, outcome, repo_path, model, log_path) -> str:
-        ...   # turn the failure log into "what the notes should say"
+    def eval(self, memory_dir: str, model: str, eval_dir: str) -> EvalOutcome:
+        ...   # run every unit of work, return one combined outcome
 ```
 
-Required: `from_config`, `run`, `build_feedback`.
-Optional hooks (`setup`, `build_prompt`, `check`, `teardown`, `build_result`, `task_id`)
-are **not** called automatically — your `run` decides.
+Required: `eval`. `parse_config` and `repo_url` have working defaults driven by the config
+file's `repo` key. The base `__init__` calls `parse_config` for you — so if you override
+`__init__`, initialize your own state *before* calling it.
 
 ---
 
@@ -188,9 +186,11 @@ are **not** called automatically — your `run` decides.
 
 | Where it breaks | What happens |
 |---|---|
-| Agent run raises | Caught in `run`; logged; round fails with the exception as the reason |
-| `build_feedback` / retraining raises | Logged; loop **continues to the next round** without retraining |
-| Repo dir exists with wrong `origin` | Removed and re-cloned (never silently trains on wrong code) |
+| Agent run raises | Caught per instance; logged; that instance counts as failed |
+| Harness never writes `test_output.txt` | `error` falls back to the harness's console output |
+| Feedback bot unavailable | Falls back to the raw concatenated per-instance results |
+| `task.eval` raises | Logged; recorded as `score = -1`; loop continues to the next round |
+| Training raises | Logged; loop continues to the next round without retraining |
 | `max_rounds` exhausted | `LoopResult(passed=False)` with every round's outcome |
 
-Whatever happens, the `finally` block still writes `result.json` and saves the round's memory.
+Whatever happens, the round's `result.json` is still written.

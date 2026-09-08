@@ -14,7 +14,7 @@ from pathlib import Path
 
 from microbots.auto_memory.orchestrator import run
 from microbots.auto_memory.task_registry import TASK_REGISTRY, discover_tasks
-from microbots.auto_memory.workdir import require_workdir, resolve_workdir
+from microbots.auto_memory.workdir import config_path, require_workdir, resolve_workdir
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +78,7 @@ def main(argv: list[str] | None = None) -> None:
     require_workdir(workdir)
 
     if not args.config_file:
-        config_file = workdir / "task_config.yaml"
+        config_file = config_path(workdir)
     else:
         config_file = args.config_file
     if not config_file.is_file():

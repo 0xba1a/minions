@@ -1,8 +1,9 @@
-"""Registry for constructing ``EvalTask`` instances by name.
+"""Registry for looking up ``EvalTask`` classes by name.
 
 Tasks self-register via the ``@register_task`` decorator, so new task
 types can be added without editing a central if/elif factory function.
-Callers (e.g. a CLI) look tasks up by name via ``create_task``.
+Callers (e.g. a CLI) look a class up in ``TASK_REGISTRY`` and construct
+it with the run's config file.
 """
 
 import importlib
@@ -22,8 +23,8 @@ def register_task(name: str) -> Callable[[type[EvalTask]], type[EvalTask]]:
     Parameters
     ----------
     name : str
-        The key other code will use to look up this task via
-        ``create_task``, e.g. ``"swebenchverified"``.
+        The key other code will use to look this task up in
+        ``TASK_REGISTRY``, e.g. ``"swebenchverified"``.
 
     Returns
     -------

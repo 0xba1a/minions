@@ -157,12 +157,12 @@ def load_instance_using_id(instance_id: str, dataset_name: str = SWE_BENCH_VERIF
             )
     raise ValueError(f"instance_id not found: {instance_id}")
 
-class SweBenchVerifiedTask_one():
-    """SWE-bench-verified based evaluation task.
+class SweBenchVerifiedTask_one:
+    """Runs and grades a single SWE-bench-verified instance.
 
     Checks out the instance's repo at its base commit, gives the agent
-    the issue's problem statement, and verifies the agent's patch using
-    the official SWE-bench evaluation harness.
+    the issue's problem statement, and verifies the resulting patch
+    with the official SWE-bench evaluation harness.
 
     Parameters
     ----------
@@ -170,28 +170,8 @@ class SweBenchVerifiedTask_one():
         The dataset instance this task evaluates against.
     """
 
-    def __init__(self, instance: SweBenchInstance | None = None):
-        """Initialize the task, optionally for a single dataset instance.
-
-        Parameters
-        ----------
-        instance : SweBenchInstance | None
-            The dataset instance this task evaluates against. May be
-            omitted and set later via ``self.instance``, but must be
-            set before any other method on this task is called.
-        """
+    def __init__(self, instance: SweBenchInstance):
         self.instance = instance
-
-    @property
-    def task_id(self) -> str:
-        """Return this instance's SWE-bench-verified ``instance_id``.
-
-        Returns
-        -------
-        str
-            The dataset instance's ``instance_id``.
-        """
-        return self.instance.instance_id
 
     def setup(self, repo_path: str) -> None:
         """Clone the instance's repo, or reset it, to its base commit.
@@ -344,26 +324,28 @@ class SweBenchVerifiedTask_one():
         )
 
     def eval(self, repo_path: str, memory_dir: str, model: str, log_path: str) -> BotRunResult:
-        """Run one eval iteration: setup -> build_prompt -> WritingBot -> check.
+        """Check out the repo and let the agent attempt the issue.
+
+        Grading is deliberately left to ``check``, which the caller runs
+        afterwards against the same checkout.
 
         Parameters
         ----------
         repo_path : str
-            Absolute path to the repo to run the eval round against.
+            Absolute path to check the instance's repo out into.
         memory_dir : str
             Directory containing memory files to give the agent via
             ``MemoryTool``.
         model : str
             The model to use, in the format ``<provider>/<model_name>``.
         log_path : str
-            Path to write this round's log to. Caller-provided, so the
-            log persists under the run's own layout.
+            Path to write this instance's log to. Truncated on entry.
 
         Returns
         -------
         BotRunResult
-            The result of this eval round, including the agent's output,
-            the check verdict.
+            The agent's run result, or a failed result carrying the
+            exception if the attempt raised.
         """
         Path(log_path).parent.mkdir(parents=True, exist_ok=True)
         Path(log_path).write_text("")
@@ -397,34 +379,46 @@ class SweBenchVerifiedTask_one():
 
 @register_task("swebenchverified")
 class SweBenchVerified(EvalTask):
-    """SWE-bench-verified based evaluation task.
+    """Evaluates memory against a set of SWE-bench-verified instances.
 
-    It takes the memory provided by the training agent and runs
-    all the selected SWE-bench-verified instances. Then provides
-    a combined score and feedback.
+    Every instance in the configured set is attempted with the same
+    memory, and the round's score is the fraction that the harness
+    marks resolved.
     """
 
     def __init__(self, config_file: Path) -> None:
-        # No need to call the base-class init
+        # dataset must exist before parse_config populates it.
         self.dataset: list[SweBenchInstance] = []
         self.parse_config(config_file=config_file)
 
     def repo_url(self) -> str:
-        """Return the URL of the repo for the training agent.
+        """Return the clone URL of the repo the instances belong to.
 
-        Returns:
-            str: The URL of the repo for the training agent.
+        Returns
+        -------
+        str
+            The training repo's clone URL. ``parse_config`` guarantees
+            every instance shares one repo.
         """
         return f"https://github.com/{self.dataset[0].repo}.git"
 
     def parse_config(self, config_file: Path) -> None:
-        """Parse the configuration file for the task.
-        The config file is a yaml file. It will have array of "instance_id"
-        or "repo" as the root object. Gather it and load the dataset to
-        the object variable dataset.
+        """Load the instances this task evaluates from ``config_file``.
 
-        Args:
-            config_file (Path): Path to the configuration file.
+        The YAML file selects instances either by an
+        ``instance_id_list`` of dataset IDs, or by a ``repo`` naming a
+        SWE-bench repo such as ``django/django``.
+
+        Parameters
+        ----------
+        config_file : Path
+            Path to the task's YAML config file.
+
+        Raises
+        ------
+        ValueError
+            If the selected instances span more than one repo, or if
+            the config selects no instances at all.
         """
 
         with open(config_file, "r") as f:
@@ -453,16 +447,23 @@ class SweBenchVerified(EvalTask):
             raise ValueError("No instances loaded for evaluation.")
 
     def eval(self, memory_dir: str, model: str, eval_dir: str) -> EvalOutcome:
-        """Runs the evaluation agent with the memory on all the eval instances
-        and produces a cumulative feedback.
+        """Attempt every configured instance and combine the results.
 
-        Args:
-            memory_dir (str): Path to the directory containing the agent's memory.
-            model (str): The model identifier used for evaluation.
-            log_path (str): Path to the log file for recording evaluation details.
+        Parameters
+        ----------
+        memory_dir : str
+            Directory containing the memory notes to evaluate.
+        model : str
+            The model to use, in the format ``<provider>/<model_name>``.
+        eval_dir : str
+            Directory this round's eval owns; holds the shared checkout
+            and one log file per instance.
 
-        Returns:
-            EvalOutcome: The outcome of the evaluation, including whether it passed, the output, and the result.
+        Returns
+        -------
+        EvalOutcome
+            ``score`` is the fraction of instances resolved, and
+            ``passed`` is true only when every one of them was.
         """
         eval_path = Path(eval_dir)
         eval_repo_path = eval_path / "eval_repo"
@@ -503,15 +504,22 @@ class SweBenchVerified(EvalTask):
         )
 
     def _combine_result_feedback(self, results: list[BotRunResult], model: str, eval_repo: str) -> str:
-        """
-        Combines the feedback from multiple BotRunResult instances into a single feedback string.
-        Args:
-            results (list[BotRunResult]): List of individual bot run results.
-            model (str): The model identifier used for evaluation.
-            eval_repo (str): Path to the evaluation repository.
+        """Summarize every instance's result into one feedback string.
 
-        Returns:
-            str: Combined feedback from all results.
+        Parameters
+        ----------
+        results : list[BotRunResult]
+            One result per attempted instance.
+        model : str
+            The model to use, in the format ``<provider>/<model_name>``.
+        eval_repo : str
+            Path to the evaluation checkout, mounted for the bot.
+
+        Returns
+        -------
+        str
+            The bot's summary, falling back to the raw concatenated
+            results if the bot is unavailable or fails.
         """
 
         serialized_str = f"Total {len(results)} tests ran and their result and feedback:\n"

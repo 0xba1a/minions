@@ -1,8 +1,7 @@
 """Defines the abstract eval task interface for the train <-> eval loop.
 
-An ``EvalTask`` describes one unit of work: how to prepare a repo, what
-prompt to give the agent, how to verify the agent's output, and how to
-clean up afterward.
+An ``EvalTask`` owns its own config, names the repo the training agent
+should learn from, and runs one complete evaluation per round.
 """
 
 from abc import ABC, abstractmethod
@@ -14,16 +13,17 @@ import yaml
 
 @dataclass
 class EvalOutcome:
-    """Result of verifying whether an eval task was completed correctly.
+    """Result of one round's evaluation.
 
     Attributes
     ----------
     passed : bool
-        Whether the agent's output satisfies the task's check.
+        Whether every unit of work in the round passed.
     score : float
-        A numeric score representing the quality of the agent's output.
+        Fraction of units that passed, or ``-1`` if the round errored.
     feedback : str
-        A short human-readable explanation of the pass/fail verdict.
+        Text describing what went wrong, fed to the next round's
+        training pass.
     """
 
     passed: bool
@@ -31,30 +31,46 @@ class EvalOutcome:
     feedback: str
 
 class EvalTask(ABC):
-    """Base class for a single evaluation task in the train <-> eval loop.
+    """Base class for an evaluation task in the train <-> eval loop.
 
-    Subclasses must implement ``run``. ``parse_config``, ``setup``,
-    ``check``, and ``teardown`` are optional hooks
-    subclasses may use to structure their own ``run`` implementation
-    (see ``SweBenchVerifiedTask`` for an example), but nothing in this
-    base class calls them automatically.
+    Subclasses must implement ``eval``. ``parse_config`` and
+    ``repo_url`` have working defaults driven by the config file's
+    ``repo`` key, and may be overridden by tasks that derive the repo
+    some other way (see ``SweBenchVerified``).
     """
 
+    _repo_url: str | None = None
+
     def __init__(self, config_file: Path) -> None:
+        # NOTE: Don't call this from child class unless you need to reuse
+        # the parse_config logic from here.
         super().__init__()
         self.parse_config(config_file=config_file)
 
     def repo_url(self) -> str:
-        """Return the URL of the repo for the training agent."""
+        """Return the URL of the repo the training agent should learn from.
+
+        Returns
+        -------
+        str
+            The training repo's clone URL.
+
+        Raises
+        ------
+        ValueError
+            If the config had no ``repo`` key and the subclass did not
+            override this method.
+        """
         if not self._repo_url:
             raise ValueError("Repo URL is not set in the config file."
                              " Or you didn't override the base method.")
         return self._repo_url
 
     def parse_config(self, config_file: Path) -> None:
-        """Parse the task-specific config file. Importantly it
-        parses the config file and get the repo for the training
-        agent.
+        """Read the task's config file, recording the training repo URL.
+
+        Called from ``__init__``. Subclasses that need more than the
+        ``repo`` key override this to load their own settings too.
 
         Parameters
         ----------
@@ -67,7 +83,7 @@ class EvalTask(ABC):
 
     @abstractmethod
     def eval(self, memory_dir: str, model: str, eval_dir: str) -> EvalOutcome:
-        """Required. Run one eval iteration and return its outcome.
+        """Required. Run one full evaluation and return its outcome.
 
         Parameters
         ----------
@@ -77,12 +93,12 @@ class EvalTask(ABC):
         model : str
             The model to use, in the format ``<provider>/<model_name>``.
         eval_dir: str
-            Path to run this round's eval. This directory is managed by
-            the eval task itself. It can have its cloned repo, logs, etc.
+            Directory this round's eval owns. The task decides what
+            goes in it (cloned repo, logs, and so on).
 
         Returns
         -------
         EvalOutcome
-            The result of this eval round, including the agent's output,
-            the check verdict.
+            Whether the round passed, its score, and the feedback to
+            retrain on.
         """

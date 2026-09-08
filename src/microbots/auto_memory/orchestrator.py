@@ -106,35 +106,27 @@ def run_train_eval_loop(
 ) -> LoopResult:
     """Run an eval task in a loop, retraining on failure until it passes.
 
-    Each round loads the current top-level memory into its own
-    ``rounds_<task_id>/round_N/memory`` (carried forward from the
-    previous round, or empty on round 1), then runs ``task.run(...)``
-    against it, writing its log to a workdir-managed path
-    (``rounds_<task_id>/round_N/eval/eval.log``) so it persists. Since
-    each eval task instance gets its own ``rounds_<task_id>`` dir,
-    different instances sharing the same ``workdir`` never collide on
-    round numbers, and each instance's per-round memory is preserved
-    individually. If the task passes, the loop returns immediately. If
-    it fails, feedback is built from the round's log and used to
-    retrain via ``run_training`` (called ``training_iterations`` times,
-    each pass reusing the same round memory dir) before the next round.
-    Either way, the round's result is written to ``result.json`` and
-    its memory is saved back to the top-level memory dir before the
-    next round starts.
+    Memory lives in one place (``workdir/memory``) and is mutated in
+    place: each round snapshots it to
+    ``rounds/round_N/starting_memory_snapshot`` before the eval agent
+    reads it, so what the round began with stays recoverable. The task
+    then evaluates against that memory in its own
+    ``rounds/round_N/eval`` directory. Passing returns immediately;
+    failing feeds ``outcome.feedback`` to ``run_training``, which
+    rewrites memory for the next round. Either way the round's outcome
+    is written to ``result.json``.
+
+    An eval that raises is logged and recorded as a failed outcome so
+    one bad round cannot discard the rounds before it.
 
     Parameters
     ----------
     training_repo_path : str
-        Absolute path to the persistent repo checkout used only for
-        retraining (``run_training_loop``). Kept separate from
-        ``eval_repo_path`` since the task manages the latter's
-        lifecycle itself (clone/teardown each round).
-    training_repo_path : str
-        Absolute path to the persistent repo checkout used only for
-        retraining (``run_training_loop``).
+        Absolute path to the persistent checkout the training agent
+        reads. Separate from the eval checkout, which the task clones
+        and resets itself every round.
     workdir : Path
-        This run's workdir, used to carry memory forward between rounds
-        (see ``microbots.auto_memory.workdir``).
+        This run's workdir (see ``microbots.auto_memory.workdir``).
     model : str
         The model to use, in the format ``<provider>/<model_name>``.
     task : EvalTask
@@ -230,36 +222,25 @@ def run(
     task: EvalTask,
     max_rounds: int = 5,
 ) -> LoopResult:
-    """Run full train/eval loop, depending on ``task``.
+    """Clone the task's training repo, then run the full train/eval loop.
 
     Parameters
     ----------
     workdir : Path
         This run's workdir (see ``microbots.auto_memory.workdir``),
-        holding ``task_config.yaml``, the shared repo clone, and all output.
+        holding the training clone, memory, and all round output.
     model : str
         The model to use, in the format ``<provider>/<model_name>``.
     task : EvalTask
-        The eval task to run each round.
+        The eval task to run each round. It also supplies the training
+        repo's clone URL via ``repo_url()``.
     max_rounds : int
         Maximum number of train/eval rounds to attempt. Defaults to 5.
-    training_iterations : int
-        Number of training passes to run per retraining round, each
-        reusing the same round memory dir. Defaults to 10.
 
     Returns
     -------
     LoopResult
         The eval loop's result.
-
-    Raises
-    ------
-    ValueError
-        If ``config`` has no ``repo`` entry. Every run needs a training
-        checkout (``run_training_loop`` always mounts
-        ``training_repo_path``, regardless of ``task``), so ``repo``
-        must be configured even for tasks like ``SweBenchVerifiedTask``
-        that manage their own separate eval checkout.
     """
     training_repo_dir = repo_dir(workdir)
     clone_repo(task.repo_url(), training_repo_dir)

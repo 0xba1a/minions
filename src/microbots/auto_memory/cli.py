@@ -13,6 +13,7 @@ import logging
 from pathlib import Path
 
 from microbots.auto_memory.orchestrator import run
+from microbots.auto_memory.run_logging import configure_run_logging
 from microbots.auto_memory.task_registry import TASK_REGISTRY, discover_tasks
 from microbots.auto_memory.workdir import config_path, require_workdir, resolve_workdir
 
@@ -76,6 +77,7 @@ def main(argv: list[str] | None = None) -> None:
     # the provided --config-file will take precedence.
     workdir = Path(args.workdir) if args.workdir else resolve_workdir()
     require_workdir(workdir)
+    configure_run_logging(workdir)
 
     if not args.config_file:
         config_file = config_path(workdir)

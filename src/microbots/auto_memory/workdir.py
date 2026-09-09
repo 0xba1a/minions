@@ -22,8 +22,10 @@ main memory dir workdir/memory
 """
 STARTING_MEMORY_SNAPSHOT_DIR = "starting_memory_snapshot"
 ROUNDS_DIRNAME = "rounds"
-ROUND_LOG_DIR= "logs"
 EVAL_DIRNAME = "eval"
+EVAL_LOG_DIRNAME = "logs"
+LOG_FILENAME = "log.txt"
+TRAINING_LOG_FILENAME = "training_log.txt"
 RESULT_FILENAME = "result.json"
 
 """
@@ -31,12 +33,17 @@ Expected workdir structure:
 
    workdir/
    ├── task_config.yaml
-   ├── repo/                              <-- Training checkout, reused across rounds
-   ├── memory/                            <-- Mutated in place; the run's living memory
+   ├── log.txt                                <-- CLI and orchestrator logs
+   ├── repo/                                  <-- Training checkout, reused across rounds
+   ├── memory/                                <-- Mutated in place; the run's living memory
    └── rounds/round_n/
-       ├── logs/                          <-- Training logs; eval logs live under eval/
-       ├── eval/                          <-- Managed by the eval task
-       └── starting_memory_snapshot/      <-- memory/ as it looked when the round began
+       ├── training_log.txt                   <-- Training agent logs for this round
+       ├── eval/                              <-- Managed by the eval task
+       │   ├── result.json
+       │   ├── eval_repo/
+       │   └── logs/
+       │       └── <instance_id>_log.txt      <-- One log per eval instance
+       └── starting_memory_snapshot/          <-- memory/ as it looked when the round began
 """
 
 
@@ -100,6 +107,22 @@ def config_path(workdir: Path) -> Path:
         ``workdir/task_config.yaml``.
     """
     return workdir / CONFIG_FILENAME
+
+
+def log_path(workdir: Path) -> Path:
+    """Return the path to the run's top-level log file.
+
+    Parameters
+    ----------
+    workdir : Path
+        The run's workdir.
+
+    Returns
+    -------
+    Path
+        ``workdir/log.txt``.
+    """
+    return workdir / LOG_FILENAME
 
 
 def repo_dir(workdir: Path) -> Path:
@@ -187,8 +210,8 @@ def round_dir(
     return path
 
 
-def round_log_dir(workdir: Path, round_num: int) -> Path:
-    """Return the path to a round's training log directory.
+def training_log_path(workdir: Path, round_num: int) -> Path:
+    """Return the path to a round's training log file.
 
     Parameters
     ----------
@@ -200,9 +223,9 @@ def round_log_dir(workdir: Path, round_num: int) -> Path:
     Returns
     -------
     Path
-        ``workdir/rounds/round_{round_num}/logs``.
+        ``workdir/rounds/round_{round_num}/training_log.txt``.
     """
-    return round_dir(workdir, round_num) / ROUND_LOG_DIR
+    return round_dir(workdir, round_num) / TRAINING_LOG_FILENAME
 
 
 def get_eval_dir(
@@ -222,5 +245,23 @@ def get_eval_dir(
         ``workdir/rounds/round_{round_num}/eval``.
     """
     path = round_dir(workdir, round_num) / EVAL_DIRNAME
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def eval_log_dir(eval_dir: Path) -> Path:
+    """Return the directory holding one log file per eval instance. Creates it if missing.
+
+    Parameters
+    ----------
+    eval_dir : Path
+        The round's eval directory, as returned by ``get_eval_dir``.
+
+    Returns
+    -------
+    Path
+        ``<eval_dir>/logs``.
+    """
+    path = eval_dir / EVAL_LOG_DIRNAME
     path.mkdir(parents=True, exist_ok=True)
     return path

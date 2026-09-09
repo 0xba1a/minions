@@ -14,6 +14,7 @@ from logging import getLogger
 from pathlib import Path
 
 from microbots.auto_memory.evalTask import EvalOutcome, EvalTask
+from microbots.auto_memory.run_logging import log_to_file
 from microbots.auto_memory.training.runner import run_training
 from microbots.auto_memory.workdir import (
     RESULT_FILENAME,
@@ -21,6 +22,7 @@ from microbots.auto_memory.workdir import (
     memory_dir,
     repo_dir,
     take_memory_snapshot,
+    training_log_path,
 )
 
 logger = getLogger(__name__)
@@ -150,7 +152,6 @@ def run_train_eval_loop(
 
     outcomes: list[EvalOutcome] = []
 
-    #TODO: Logs need to be saved to appropriate log files
     for round_idx in range(1, max_rounds+1):
         logger.info(
             "run_train_eval_loop: round %d/%d starting", round_idx, max_rounds
@@ -191,12 +192,13 @@ def run_train_eval_loop(
             )
 
             try:
-                run_training(
-                    repo_path=training_repo_path,
-                    feedback=outcome.feedback,
-                    memory_dir=str(mem_dir),
-                    model=model,
-            )
+                with log_to_file(training_log_path(workdir, round_idx)):
+                    run_training(
+                        repo_path=training_repo_path,
+                        feedback=outcome.feedback,
+                        memory_dir=str(mem_dir),
+                        model=model,
+                    )
             except Exception:
                 logger.exception(
                     "run_train_eval_loop: round %d failed to build feedback/retrain; "

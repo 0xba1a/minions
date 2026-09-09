@@ -19,7 +19,9 @@ from pathlib import Path
 import yaml
 
 from microbots.auto_memory.evalTask import EvalOutcome, EvalTask
+from microbots.auto_memory.run_logging import log_to_file
 from microbots.auto_memory.task_registry import register_task
+from microbots.auto_memory.workdir import eval_log_dir
 from microbots.bot.ReadingBot import ReadingBot
 from microbots.bot.WritingBot import WritingBot
 from microbots.MicroBot import BotRunResult
@@ -254,8 +256,10 @@ class SweBenchVerifiedTask_one:
         subprocess.run(
             ["git", "add", "--intent-to-add", "."], cwd=repo_path, check=True
         )
+        # Diffed against the base commit, so the patch is the same whether or
+        # not the agent committed its work.
         diff = subprocess.run(
-            ["git", "diff", "--binary"],
+            ["git", "diff", "--binary", self.instance.base_commit],
             cwd=repo_path,
             capture_output=True,
             text=True,
@@ -460,8 +464,8 @@ class SweBenchVerified(EvalTask):
         model : str
             The model to use, in the format ``<provider>/<model_name>``.
         eval_dir : str
-            Directory this round's eval owns; holds the shared checkout
-            and one log file per instance.
+            Directory this round's eval owns; holds one checkout and one
+            log file per instance.
 
         Returns
         -------
@@ -470,22 +474,26 @@ class SweBenchVerified(EvalTask):
             ``passed`` is true only when every one of them was.
         """
         eval_path = Path(eval_dir)
-        eval_repo_path = eval_path / "eval_repo"
-        eval_log_dir = eval_path / "logs"
+        # One checkout per instance: the agent's container writes to it as
+        # root, leaving it unresettable for any instance that came after.
+        eval_repos_path = eval_path / "eval_repo"
+        log_dir = eval_log_dir(eval_path)
         results = []
 
         for instance in self.dataset:
-            inst_log_path = eval_log_dir / f"{instance.instance_id}_log.txt"
+            inst_log_path = log_dir / f"{instance.instance_id}_log.txt"
+            inst_repo_path = eval_repos_path / instance.instance_id
             task = SweBenchVerifiedTask_one(instance)
 
-            res = task.eval(str(eval_repo_path), memory_dir, model, str(inst_log_path))
+            with log_to_file(inst_log_path):
+                res = task.eval(str(inst_repo_path), memory_dir, model, str(inst_log_path))
 
-            if not res.status:
-                logger.info(f"Evaluation failed for instance {instance.instance_id}: {res.error if res.error else 'Unknown error'}")
-                results.append(res)
-            else:
-                res = task.check(str(eval_repo_path), "", str(inst_log_path))
-                results.append(res)
+                if not res.status:
+                    logger.info(f"Evaluation failed for instance {instance.instance_id}: {res.error if res.error else 'Unknown error'}")
+                    results.append(res)
+                else:
+                    res = task.check(str(inst_repo_path), "", str(inst_log_path))
+                    results.append(res)
 
         score = 0
         for result in results:
@@ -497,7 +505,7 @@ class SweBenchVerified(EvalTask):
         if score == 1:
             feedback = "All evaluations passed."
         else:
-            feedback = self._combine_result_feedback(results, model, str(eval_repo_path))
+            feedback = self._combine_result_feedback(results, model, str(eval_repos_path))
 
         # NOTE: Let's not teardown the repository as it will be useful for debugging
 

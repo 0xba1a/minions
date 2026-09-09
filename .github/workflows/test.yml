@@ -121,9 +121,17 @@ jobs:
 
       - name: Reinstall Azure CLI (removed by disk cleanup)
         if: matrix.test-type == 'slow-browser' || matrix.test-type == 'slow-other' || matrix.test-type == 'ollama_local'
+        shell: bash
         run: |
+          sudo install -d -m 0755 /etc/apt/keyrings
+          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc |
+            gpg --dearmor | sudo tee /etc/apt/keyrings/azure-cli.gpg > /dev/null
+          sudo chmod 0644 /etc/apt/keyrings/azure-cli.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/azure-cli.gpg] https://packages.microsoft.com/repos/azure-cli/ $(lsb_release -cs) main" |
+            sudo tee /etc/apt/sources.list.d/azure-cli.list > /dev/null
           sudo apt-get update
           sudo apt-get install -y azure-cli
+          az version
 
       - name: Checkout code
         uses: actions/checkout@v4

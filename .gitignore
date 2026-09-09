@@ -1,3 +1,6 @@
+# Any workdir
+**/workdir*/
+
 # Microbots Project Specific
 .playwright-mcp/
 

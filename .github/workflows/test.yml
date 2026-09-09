@@ -121,7 +121,9 @@ jobs:
 
       - name: Reinstall Azure CLI (removed by disk cleanup)
         if: matrix.test-type == 'slow-browser' || matrix.test-type == 'slow-other' || matrix.test-type == 'ollama_local'
-        run: sudo apt-get install -y azure-cli
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y azure-cli
 
       - name: Checkout code
         uses: actions/checkout@v4

@@ -21,9 +21,7 @@
 
 set -euo pipefail
 
-REPO_URL="${REPO_URL:-https://github.com/microsoft/microbots.git}"
-REPO_DIR="${REPO_DIR:-$HOME/minions}"
-BRANCH="${BRANCH:-kkaitepalli/eval-agent}"
+REPO_DIR="${REPO_DIR:-$HOME/microbots}"
 WORKDIR="${WORKDIR:-$HOME/workdir}"
 MODEL="${MODEL:-azure-openai/gpt-6-astra}"
 # Path to a task_config.yaml prepared beforehand (e.g. copied via scp).
@@ -34,7 +32,6 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 echo "============================================"
 echo "  Auto-memory eval agent VM setup"
 echo "============================================"
-echo "  Repo URL:       $REPO_URL"
 echo "  Repo dir:       $REPO_DIR"
 echo "  Workdir:        $WORKDIR"
 echo "  Model:          $MODEL"
@@ -80,17 +77,6 @@ if ! id -nG "$USER" | grep -qw docker; then
     exec sg docker "$0 $*"
 fi
 
-# --- Step 3: Clone repo ---
-echo "[3/6] Cloning minions repo..."
-if [[ -d "$REPO_DIR/.git" ]]; then
-    echo "  $REPO_DIR already a git checkout; fetching latest instead."
-    git -C "$REPO_DIR" fetch origin
-else
-    git clone "$REPO_URL" "$REPO_DIR"
-fi
-echo "  Checking out branch: $BRANCH"
-git -C "$REPO_DIR" checkout "$BRANCH"
-git -C "$REPO_DIR" pull --ff-only origin "$BRANCH" || true
 
 # --- Step 4: Virtualenv + install ---
 echo "[4/6] Creating virtualenv and installing microbots[training]..."
